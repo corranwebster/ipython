@@ -1,6 +1,7 @@
 """Implementation of code management magic functions.
 """
 from __future__ import print_function
+from __future__ import absolute_import
 #-----------------------------------------------------------------------------
 #  Copyright (c) 2012 The IPython Development Team.
 #
@@ -31,8 +32,9 @@ from IPython.testing.skipdoctest import skip_doctest
 from IPython.utils import py3compat
 from IPython.utils.py3compat import string_types
 from IPython.utils.contexts import preserve_keys
-from IPython.utils.path import get_py_filename, unquote_filename
-from IPython.utils.warn import warn, error
+from IPython.utils.path import get_py_filename
+from warnings import warn
+from logging import error
 from IPython.utils.text import get_text_list
 
 #-----------------------------------------------------------------------------
@@ -136,6 +138,36 @@ def extract_symbols(code, symbols):
 
     return blocks, not_found
 
+def strip_initial_indent(lines):
+    """For %load, strip indent from lines until finding an unindented line.
+
+    https://github.com/ipython/ipython/issues/9775
+    """
+    indent_re = re.compile(r'\s+')
+
+    it = iter(lines)
+    first_line = next(it)
+    indent_match = indent_re.match(first_line)
+
+    if indent_match:
+        # First line was indented
+        indent = indent_match.group()
+        yield first_line[len(indent):]
+
+        for line in it:
+            if line.startswith(indent):
+                yield line[len(indent):]
+            else:
+                # Less indented than the first line - stop dedenting
+                yield line
+                break
+    else:
+        yield first_line
+
+    # Pass the remaining lines through without dedenting
+    for line in it:
+        yield line
+
 
 class InteractivelyDefined(Exception):
     """Exception for interactively defined variable in magic_edit"""
@@ -146,6 +178,10 @@ class InteractivelyDefined(Exception):
 @magics_class
 class CodeMagics(Magics):
     """Magics related to code management (loading, saving, editing, ...)."""
+
+    def __init__(self, *args, **kwargs):
+        self._knowntemps = set()
+        super(CodeMagics, self).__init__(*args, **kwargs)
 
     @line_magic
     def save(self, parameter_s=''):
@@ -183,7 +219,7 @@ class CodeMagics(Magics):
         append = 'a' in opts
         mode = 'a' if append else 'w'
         ext = u'.ipy' if raw else u'.py'
-        fname, codefrom = unquote_filename(args[0]), " ".join(args[1:])
+        fname, codefrom = args[0], " ".join(args[1:])
         if not fname.endswith((u'.py',u'.ipy')):
             fname += ext
         file_exists = os.path.isfile(fname)
@@ -272,7 +308,8 @@ class CodeMagics(Magics):
         Usage:\\
           %load [options] source
 
-          where source can be a filename, URL, input history range or macro
+          where source can be a filename, URL, input history range, macro, or
+          element in the user namespace
 
         Options:
 
@@ -284,6 +321,8 @@ class CodeMagics(Magics):
           -s <symbols>: Specify function or classes to load from python source. 
 
           -y : Don't ask confirmation for loading source above 200 000 characters.
+
+          -n : Include the user's namespace when searching for source code.
 
         This magic command can either take a local filename, a URL, an history
         range (see %history) or a macro as argument, it will prompt for
@@ -297,14 +336,18 @@ class CodeMagics(Magics):
         %load -r 5-10 myscript.py
         %load -r 10-20,30,40: foo.py
         %load -s MyClass,wonder_function myscript.py
+        %load -n MyClass
+        %load -n my_module.wonder_function
         """
-        opts,args = self.parse_options(arg_s,'ys:r:')
+        opts,args = self.parse_options(arg_s,'yns:r:')
 
         if not args:
             raise UsageError('Missing filename, URL, input history range, '
-                             'or macro.')
+                             'macro, or element in the user namespace.')
 
-        contents = self.shell.find_user_code(args)
+        search_ns = 'n' in opts
+
+        contents = self.shell.find_user_code(args, search_ns=search_ns)
 
         if 's' in opts:
             try:
@@ -328,7 +371,7 @@ class CodeMagics(Magics):
             lines = contents.split('\n')
             slices = extract_code_ranges(ranges)
             contents = [lines[slice(*slc)] for slc in slices]
-            contents = '\n'.join(chain.from_iterable(contents))
+            contents = '\n'.join(strip_initial_indent(chain.from_iterable(contents)))
 
         l = len(contents)
 
@@ -346,7 +389,9 @@ class CodeMagics(Magics):
                 print('Operation cancelled.')
                 return
 
-        self.shell.set_next_input(contents)
+        contents = "# %load {}\n".format(arg_s) + contents
+
+        self.shell.set_next_input(contents, replace=True)
 
     @staticmethod
     def _find_edit_target(shell, args, opts, last_call):
@@ -354,7 +399,6 @@ class CodeMagics(Magics):
 
         def make_filename(arg):
             "Make a filename from the given args"
-            arg = unquote_filename(arg)
             try:
                 filename = get_py_filename(arg)
             except IOError:
@@ -651,6 +695,12 @@ class CodeMagics(Magics):
             # nothing was found, warnings have already been issued,
             # just give up.
             return
+
+        if is_temp:
+            self._knowntemps.add(filename)
+        elif (filename in self._knowntemps):
+            is_temp = True
+
 
         # do actual editing here
         print('Editing...', end=' ')

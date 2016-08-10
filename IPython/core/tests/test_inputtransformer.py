@@ -41,16 +41,29 @@ syntax = \
        [(i,py3compat.u_format(o)) for i,o in \
        [(u'a =! ls', "a = get_ipython().getoutput({u}'ls')"),
         (u'b = !ls', "b = get_ipython().getoutput({u}'ls')"),
+        (u'c= !ls', "c = get_ipython().getoutput({u}'ls')"),
+        (u'd == !ls', u'd == !ls'), # Invalid syntax, but we leave == alone.
         ('x=1', 'x=1'), # normal input is unmodified
         ('    ','    '),  # blank lines are kept intact
+        # Tuple unpacking
+        (u"a, b = !echo 'a\\nb'", u"a, b = get_ipython().getoutput({u}\"echo 'a\\\\nb'\")"),
+        (u"a,= !echo 'a'", u"a, = get_ipython().getoutput({u}\"echo 'a'\")"),
+        (u"a, *bc = !echo 'a\\nb\\nc'", u"a, *bc = get_ipython().getoutput({u}\"echo 'a\\\\nb\\\\nc'\")"),
+        # Tuple unpacking with regular Python expressions, not our syntax.
+        (u"a, b = range(2)", u"a, b = range(2)"),
+        (u"a, = range(1)", u"a, = range(1)"),
+        (u"a, *bc = range(3)", u"a, *bc = range(3)"),
         ]],
 
        assign_magic =
        [(i,py3compat.u_format(o)) for i,o in \
        [(u'a =% who', "a = get_ipython().magic({u}'who')"),
         (u'b = %who', "b = get_ipython().magic({u}'who')"),
+        (u'c= %ls', "c = get_ipython().magic({u}'ls')"),
+        (u'd == %ls', u'd == %ls'), # Invalid syntax, but we leave == alone.
         ('x=1', 'x=1'), # normal input is unmodified
         ('    ','    '),  # blank lines are kept intact
+        (u"a, b = %foo", u"a, b = get_ipython().magic({u}'foo')"),
         ]],
 
        classic_prompt =
@@ -199,6 +212,10 @@ syntax_ml = \
           ('...', ''),
           ('...     return x', '    return x'),
           ],
+         [('board = """....', 'board = """....'),
+          ('....', '....'),
+          ('...."""', '...."""'),
+          ],
         ],
 
        ipy_prompt =
@@ -210,6 +227,16 @@ syntax_ml = \
           # Qt console prompts expand with spaces, not dots
           ('    ...:     print i','    print i'),
           ('    ...: ', ''),
+          ],
+         [('In [24]: for i in range(10):','for i in range(10):'),
+          # Sometimes whitespace preceding '...' has been removed
+          ('...:     print i','    print i'),
+          ('...: ', ''),
+          ],
+         [('In [24]: for i in range(10):','for i in range(10):'),
+          # Space after last continuation prompt has been removed (issue #6674)
+          ('...:     print i','    print i'),
+          ('...:', ''),
           ],
          [('In [2]: a="""','a="""'),
           ('   ...: 123"""','123"""'),
@@ -333,11 +360,24 @@ def test_classic_prompt():
     for example in syntax_ml['multiline_datastructure_prompt']:
         transform_checker(example, ipt.classic_prompt)
 
+    # Check that we don't transform the second line if the first is obviously
+    # IPython syntax
+    transform_checker([
+        (u'%foo', '%foo'),
+        (u'>>> bar', '>>> bar'),
+    ], ipt.classic_prompt)
+
 
 def test_ipy_prompt():
     tt.check_pairs(transform_and_reset(ipt.ipy_prompt), syntax['ipy_prompt'])
     for example in syntax_ml['ipy_prompt']:
         transform_checker(example, ipt.ipy_prompt)
+
+    # Check that we don't transform the second line if we're inside a cell magic
+    transform_checker([
+        (u'%%foo', '%%foo'),
+        (u'In [1]: bar', 'In [1]: bar'),
+    ], ipt.ipy_prompt)
 
 def test_coding_cookie():
     tt.check_pairs(transform_and_reset(ipt.strip_encoding_cookie), syntax['strip_encoding_cookie'])

@@ -34,7 +34,6 @@ from IPython.core.magic import  (
 )
 from IPython.testing.skipdoctest import skip_doctest
 from IPython.utils.openpy import source_to_unicode
-from IPython.utils.path import unquote_filename
 from IPython.utils.process import abbrev_cwd
 from IPython.utils import py3compat
 from IPython.utils.py3compat import unicode_type
@@ -97,9 +96,9 @@ class OSMagics(Magics):
           In [9]: show $$PATH
           /usr/local/lf9560/bin:/usr/local/intel/compiler70/ia32/bin:...
 
-        You can use the alias facility to acess all of $PATH.  See the %rehash
-        and %rehashx functions, which automatically create aliases for the
-        contents of your $PATH.
+        You can use the alias facility to acess all of $PATH.  See the %rehashx
+        function, which automatically creates aliases for the contents of your
+        $PATH.
 
         If called with no parameters, %alias prints the current alias table."""
 
@@ -148,8 +147,8 @@ class OSMagics(Magics):
     def rehashx(self, parameter_s=''):
         """Update the alias table with all executable files in $PATH.
 
-        This version explicitly checks that every entry in $PATH is a file
-        with execute access (os.X_OK), so it is much slower than %rehash.
+        rehashx explicitly checks that every entry in $PATH is a file
+        with execute access (os.X_OK).
 
         Under Windows, it checks executability as a match against a
         '|'-separated string of extensions, stored in the IPython config
@@ -165,7 +164,6 @@ class OSMagics(Magics):
 
         path = [os.path.abspath(os.path.expanduser(p)) for p in
             os.environ.get('PATH','').split(os.pathsep)]
-        path = filter(os.path.isdir,path)
 
         syscmdlist = []
         # Now define isexec in a cross platform manner.
@@ -189,8 +187,12 @@ class OSMagics(Magics):
             # the innermost part
             if os.name == 'posix':
                 for pdir in path:
-                    os.chdir(pdir)
-                    for ff in os.listdir(pdir):
+                    try:
+                        os.chdir(pdir)
+                        dirlist = os.listdir(pdir)
+                    except OSError:
+                        continue
+                    for ff in dirlist:
                         if isexec(ff):
                             try:
                                 # Removes dots from the name since ipython
@@ -205,8 +207,12 @@ class OSMagics(Magics):
             else:
                 no_alias = Alias.blacklist
                 for pdir in path:
-                    os.chdir(pdir)
-                    for ff in os.listdir(pdir):
+                    try:
+                        os.chdir(pdir)
+                        dirlist = os.listdir(pdir)
+                    except OSError:
+                        continue
+                    for ff in dirlist:
                         base, ext = os.path.splitext(ff)
                         if isexec(ff) and base.lower() not in no_alias:
                             if ext.lower() == '.exe':
@@ -317,10 +323,7 @@ class OSMagics(Magics):
 
 
         else:
-            #turn all non-space-escaping backslashes to slashes,
-            # for c:\windows\directory\names\
-            parameter_s = re.sub(r'\\(?! )','/', parameter_s)
-            opts,ps = self.parse_options(parameter_s,'qb',mode='string')
+            opts, ps = self.parse_options(parameter_s, 'qb', mode='string')
         # jump to previous
         if ps == '-':
             try:
@@ -341,8 +344,6 @@ class OSMagics(Magics):
                         raise UsageError("Bookmark '%s' not found.  "
                               "Use '%%bookmark -l' to see your bookmarks." % ps)
 
-        # strip extra quotes on Windows, because os.chdir doesn't like them
-        ps = unquote_filename(ps)
         # at this point ps should point to the target dir
         if ps:
             try:
@@ -371,12 +372,61 @@ class OSMagics(Magics):
         if not 'q' in opts and self.shell.user_ns['_dh']:
             print(self.shell.user_ns['_dh'][-1])
 
-
     @line_magic
     def env(self, parameter_s=''):
-        """List environment variables."""
+        """Get, set, or list environment variables.
 
+        Usage:\\
+
+          %env: lists all environment variables/values
+          %env var: get value for var
+          %env var val: set value for var
+          %env var=val: set value for var
+          %env var=$val: set value for var, using python expansion if possible
+        """
+        if parameter_s.strip():
+            split = '=' if '=' in parameter_s else ' '
+            bits = parameter_s.split(split)
+            if len(bits) == 1:
+                key = parameter_s.strip()
+                if key in os.environ:
+                    return os.environ[key]
+                else:
+                    err = "Environment does not have key: {0}".format(key)
+                    raise UsageError(err)
+            if len(bits) > 1:
+                return self.set_env(parameter_s)
         return dict(os.environ)
+
+    @line_magic
+    def set_env(self, parameter_s):
+        """Set environment variables.  Assumptions are that either "val" is a
+        name in the user namespace, or val is something that evaluates to a
+        string.
+
+        Usage:\\
+          %set_env var val: set value for var
+          %set_env var=val: set value for var
+          %set_env var=$val: set value for var, using python expansion if possible
+        """
+        split = '=' if '=' in parameter_s else ' '
+        bits = parameter_s.split(split, 1)
+        if not parameter_s.strip() or len(bits)<2:
+            raise UsageError("usage is 'set_env var=val'")
+        var = bits[0].strip()
+        val = bits[1].strip()
+        if re.match(r'.*\s.*', var):
+            # an environment variable with whitespace is almost certainly
+            # not what the user intended.  what's more likely is the wrong
+            # split was chosen, ie for "set_env cmd_args A=B", we chose
+            # '=' for the split and should have chosen ' '.  to get around
+            # this, users should just assign directly to os.environ or use
+            # standard magic {var} expansion.
+            err = "refusing to set env var with whitespace: '{0}'"
+            err = err.format(val)
+            raise UsageError(err)
+        os.environ[py3compat.cast_bytes_py2(var)] = py3compat.cast_bytes_py2(val)
+        print('env: {0}={1}'.format(var,val))
 
     @line_magic
     def pushd(self, parameter_s=''):
@@ -387,7 +437,7 @@ class OSMagics(Magics):
         """
 
         dir_s = self.shell.dir_stack
-        tgt = os.path.expanduser(unquote_filename(parameter_s))
+        tgt = os.path.expanduser(parameter_s)
         cwd = py3compat.getcwd().replace(self.shell.home_dir,'~')
         if tgt:
             self.cd(parameter_s)
@@ -663,8 +713,7 @@ class OSMagics(Magics):
         elif 'r' in opts:
             bkms = {}
         elif 'l' in opts:
-            bks = bkms.keys()
-            bks.sort()
+            bks = sorted(bkms)
             if bks:
                 size = max(map(len, bks))
             else:
@@ -726,8 +775,8 @@ class OSMagics(Magics):
         The file will be overwritten unless the -a (--append) flag is specified.
         """
         args = magic_arguments.parse_argstring(self.writefile, line)
-        filename = os.path.expanduser(unquote_filename(args.filename))
-        
+        filename = os.path.expanduser(args.filename)
+
         if os.path.exists(filename):
             if args.append:
                 print("Appending to %s" % filename)

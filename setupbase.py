@@ -8,29 +8,23 @@ This includes:
     * Functions for finding things like packages, package data, etc.
     * A function for checking dependencies.
 """
+
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
+
 from __future__ import print_function
 
-#-------------------------------------------------------------------------------
-#  Copyright (C) 2008  The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-------------------------------------------------------------------------------
-
-#-------------------------------------------------------------------------------
-# Imports
-#-------------------------------------------------------------------------------
-import errno
+import re
 import os
 import sys
 
+from distutils import log
 from distutils.command.build_py import build_py
 from distutils.command.build_scripts import build_scripts
 from distutils.command.install import install
 from distutils.command.install_scripts import install_scripts
 from distutils.cmd import Command
 from glob import glob
-from subprocess import call
 
 from setupext import install_data_ext
 
@@ -86,7 +80,6 @@ setup_args = dict(
       author           = author,
       author_email     = author_email,
       url              = url,
-      download_url     = download_url,
       license          = license,
       platforms        = platforms,
       keywords         = keywords,
@@ -127,68 +120,19 @@ def find_package_data():
     # This is not enough for these things to appear in an sdist.
     # We need to muck with the MANIFEST to get this to work
     
-    # exclude components from the walk,
-    # we will build the components separately
-    excludes = ['components']
-    
-    # add 'static/' prefix to exclusions, and tuplify for use in startswith
-    excludes = tuple([pjoin('static', ex) for ex in excludes])
-    
-    # walk notebook resources:
-    cwd = os.getcwd()
-    os.chdir(os.path.join('IPython', 'html'))
-    static_data = []
-    for parent, dirs, files in os.walk('static'):
-        if parent.startswith(excludes):
-            continue
-        for f in files:
-            static_data.append(pjoin(parent, f))
-    components = pjoin("static", "components")
-    # select the components we actually need to install
-    # (there are lots of resources we bundle for sdist-reasons that we don't actually use)
-    static_data.extend([
-        pjoin(components, "backbone", "backbone-min.js"),
-        pjoin(components, "bootstrap", "bootstrap", "js", "bootstrap.min.js"),
-        pjoin(components, "font-awesome", "font", "*.*"),
-        pjoin(components, "highlight.js", "build", "highlight.pack.js"),
-        pjoin(components, "jquery", "jquery.min.js"),
-        pjoin(components, "jquery-ui", "ui", "minified", "jquery-ui.min.js"),
-        pjoin(components, "jquery-ui", "themes", "smoothness", "jquery-ui.min.css"),
-        pjoin(components, "marked", "lib", "marked.js"),
-        pjoin(components, "requirejs", "require.js"),
-        pjoin(components, "underscore", "underscore-min.js"),
-    ])
-    
-    # Ship all of Codemirror's CSS and JS
-    for parent, dirs, files in os.walk(pjoin(components, 'codemirror')):
-        for f in files:
-            if f.endswith(('.js', '.css')):
-                static_data.append(pjoin(parent, f))
-    
-    os.chdir(os.path.join('tests',))
-    js_tests = glob('*.js') + glob('*/*.js')
-
-    os.chdir(os.path.join(cwd, 'IPython', 'nbconvert'))
-    nbconvert_templates = [os.path.join(dirpath, '*.*')
-                            for dirpath, _, _ in os.walk('templates')]
-
-    os.chdir(cwd)
-
     package_data = {
-        'IPython.config.profile' : ['README*', '*/*.py'],
-        'IPython.core.tests' : ['*.png', '*.jpg'],
+        'IPython.core' : ['profile/README*'],
+        'IPython.core.tests' : ['*.png', '*.jpg', 'daft_extension/*.py'],
         'IPython.lib.tests' : ['*.wav'],
         'IPython.testing.plugin' : ['*.txt'],
-        'IPython.html' : ['templates/*'] + static_data,
-        'IPython.html.tests' : js_tests,
-        'IPython.qt.console' : ['resources/icon/*.svg'],
-        'IPython.nbconvert' : nbconvert_templates +
-            ['tests/files/*.*', 'exporters/tests/files/*.*'],
-        'IPython.nbconvert.filters' : ['marked.js'],
-        'IPython.nbformat' : ['tests/*.ipynb']
     }
     
-    # verify that package_data makes sense
+    return package_data
+
+
+def check_package_data(package_data):
+    """verify that package_data globs make sense"""
+    print("checking package data")
     for pkg, data in package_data.items():
         pkg_root = pjoin(*pkg.split('.'))
         for d in data:
@@ -198,7 +142,17 @@ def find_package_data():
             else:
                 assert os.path.exists(path), "Missing package data: %s" % path
 
-    return package_data
+
+def check_package_data_first(command):
+    """decorator for checking package_data before running a given command
+    
+    Probably only needs to wrap build_py
+    """
+    class DecoratedCommand(command):
+        def run(self):
+            check_package_data(self.package_data)
+            command.run(self)
+    return DecoratedCommand
 
 
 #---------------------------------------------------------------------------
@@ -330,21 +284,17 @@ def target_update(target,deps,cmd):
 #---------------------------------------------------------------------------
 
 def find_entry_points():
-    """Find IPython's scripts.
+    """Defines the command line entry points for IPython
 
-    if entry_points is True:
-        return setuptools entry_point-style definitions
-    else:
-        return file paths of plain scripts [default]
+    This always uses setuptools-style entry points. When setuptools is not in
+    use, our own build_scripts_entrypt class below parses these and builds
+    command line scripts.
 
-    suffix is appended to script names if entry_points is True, so that the
-    Python 3 scripts get named "ipython3" etc.
+    Each of our entry points gets both a plain name, e.g. ipython, and one
+    suffixed with the Python major version number, e.g. ipython3. 
     """
     ep = [
             'ipython%s = IPython:start_ipython',
-            'ipcontroller%s = IPython.parallel.apps.ipcontrollerapp:launch_new_instance',
-            'ipengine%s = IPython.parallel.apps.ipengineapp:launch_new_instance',
-            'ipcluster%s = IPython.parallel.apps.ipclusterapp:launch_new_instance',
             'iptest%s = IPython.testing.iptestcontroller:main',
         ]
     suffix = str(sys.version_info[0])
@@ -358,6 +308,14 @@ if __name__ == '__main__':
 """
 
 class build_scripts_entrypt(build_scripts):
+    """Build the command line scripts
+    
+    Parse setuptools style entry points and write simple scripts to run the
+    target functions.
+    
+    On Windows, this also creates .cmd wrappers for the scripts so that you can
+    easily launch them from a command line.
+    """
     def run(self):
         self.mkpath(self.build_dir)
         outfiles = []
@@ -373,6 +331,16 @@ class build_scripts_entrypt(build_scripts):
             with open(outfile, 'w') as f:
                 f.write(script_src.format(executable=sys.executable,
                                           mod=mod, func=func))
+            
+            if sys.platform == 'win32':
+                # Write .cmd wrappers for Windows so 'ipython' etc. work at the
+                # command line
+                cmd_file = os.path.join(self.build_dir, name + '.cmd')
+                cmd = '@"{python}" "%~dp0\{script}" %*\r\n'.format(
+                        python=sys.executable, script=name)
+                log.info("Writing %s wrapper script" % cmd_file)
+                with open(cmd_file, 'w') as f:
+                    f.write(cmd)
 
         return outfiles, outfiles
 
@@ -437,75 +405,10 @@ class install_scripts_for_symlink(install_scripts):
                                    ('skip_build', 'skip_build'),
                                   )
 
-#---------------------------------------------------------------------------
-# Verify all dependencies
-#---------------------------------------------------------------------------
-
-def check_for_dependencies():
-    """Check for IPython's dependencies.
-
-    This function should NOT be called if running under setuptools!
-    """
-    from setupext.setupext import (
-        print_line, print_raw, print_status,
-        check_for_sphinx, check_for_pygments,
-        check_for_nose, check_for_pexpect,
-        check_for_pyzmq, check_for_readline,
-        check_for_jinja2, check_for_tornado
-    )
-    print_line()
-    print_raw("BUILDING IPYTHON")
-    print_status('python', sys.version)
-    print_status('platform', sys.platform)
-    if sys.platform == 'win32':
-        print_status('Windows version', sys.getwindowsversion())
-
-    print_raw("")
-    print_raw("OPTIONAL DEPENDENCIES")
-
-    check_for_sphinx()
-    check_for_pygments()
-    check_for_nose()
-    if os.name == 'posix':
-        check_for_pexpect()
-    check_for_pyzmq()
-    check_for_tornado()
-    check_for_readline()
-    check_for_jinja2()
 
 #---------------------------------------------------------------------------
 # VCS related
 #---------------------------------------------------------------------------
-
-# utils.submodule has checks for submodule status
-execfile(pjoin('IPython','utils','submodule.py'), globals())
-
-class UpdateSubmodules(Command):
-    """Update git submodules
-    
-    IPython's external javascript dependencies live in a separate repo.
-    """
-    description = "Update git submodules"
-    user_options = []
-    
-    def initialize_options(self):
-        pass
-    
-    def finalize_options(self):
-        pass
-    
-    def run(self):
-        failure = False
-        try:
-            self.spawn('git submodule init'.split())
-            self.spawn('git submodule update --recursive'.split())
-        except Exception as e:
-            failure = e
-            print(e)
-        
-        if not check_submodule_status(repo_root) == 'clean':
-            print("submodules could not be checked out")
-            sys.exit(1)
 
 
 def git_prebuild(pkg_dir, build_cmd=build_py):
@@ -514,13 +417,18 @@ def git_prebuild(pkg_dir, build_cmd=build_py):
     records git commit in IPython.utils._sysinfo.commit
     
     for use in IPython.utils.sysinfo.sys_info() calls after installation.
-    
-    Also ensures that submodules exist prior to running
     """
     
     class MyBuildPy(build_cmd):
         ''' Subclass to write commit data into installation tree '''
         def run(self):
+            # loose as `.dev` is suppose to be invalid
+            print("check version number")
+            loose_pep440re = re.compile('^(\d+)\.(\d+)\.(\d+((a|b|rc)\d+)?)(\.post\d+)?(\.dev\d*)?$')
+            if not loose_pep440re.match(version):
+                raise ValueError("Version number '%s' is not valid (should match [N!]N(.N)*[{a|b|rc}N][.postN][.devN])" % version)
+
+
             build_cmd.run(self)
             # this one will only fire for build commands
             if hasattr(self, 'build_lib'):
@@ -555,126 +463,7 @@ def git_prebuild(pkg_dir, build_cmd=build_py):
             with open(out_pth, 'w') as out_file:
                 out_file.writelines([
                     '# GENERATED BY setup.py\n',
-                    'commit = "%s"\n' % repo_commit,
+                    'commit = u"%s"\n' % repo_commit,
                 ])
-    return require_submodules(MyBuildPy)
+    return MyBuildPy
 
-
-def require_submodules(command):
-    """decorator for instructing a command to check for submodules before running"""
-    class DecoratedCommand(command):
-        def run(self):
-            if not check_submodule_status(repo_root) == 'clean':
-                print("submodules missing! Run `setup.py submodule` and try again")
-                sys.exit(1)
-            command.run(self)
-    return DecoratedCommand
-
-#---------------------------------------------------------------------------
-# bdist related
-#---------------------------------------------------------------------------
-
-def get_bdist_wheel():
-    """Construct bdist_wheel command for building wheels
-    
-    Constructs py2-none-any tag, instead of py2.7-none-any
-    """
-    class RequiresWheel(Command):
-        description = "Dummy command for missing bdist_wheel"
-        user_options = []
-
-        def initialize_options(self):
-            pass
-
-        def finalize_options(self):
-            pass
-
-        def run(self):
-            print("bdist_wheel requires the wheel package")
-            sys.exit(1)
-
-    if 'setuptools' not in sys.modules:
-        return RequiresWheel
-    else:
-        try:
-            from wheel.bdist_wheel import bdist_wheel, read_pkg_info, write_pkg_info
-        except ImportError:
-            return RequiresWheel
-        
-        class bdist_wheel_tag(bdist_wheel):
-
-            def get_tag(self):
-                return ('py%i' % sys.version_info[0], 'none', 'any')
-
-            def add_requirements(self, metadata_path):
-                """transform platform-dependent requirements"""
-                pkg_info = read_pkg_info(metadata_path)
-                # pkg_info is an email.Message object (?!)
-                # we have to remove the unconditional 'readline' and/or 'pyreadline' entries
-                # and transform them to conditionals
-                requires = pkg_info.get_all('Requires-Dist')
-                del pkg_info['Requires-Dist']
-                def _remove_startswith(lis, prefix):
-                    """like list.remove, but with startswith instead of =="""
-                    found = False
-                    for idx, item in enumerate(lis):
-                        if item.startswith(prefix):
-                            found = True
-                            break
-                    if found:
-                        lis.pop(idx)
-                
-                for pkg in ("readline", "pyreadline"):
-                    _remove_startswith(requires, pkg)
-                requires.append("readline; sys.platform == 'darwin'")
-                requires.append("pyreadline (>=2.0); sys.platform == 'win32'")
-                for r in requires:
-                    pkg_info['Requires-Dist'] = r
-                write_pkg_info(metadata_path, pkg_info)
-        
-        return bdist_wheel_tag
-
-#---------------------------------------------------------------------------
-# Notebook related
-#---------------------------------------------------------------------------
-
-class CompileCSS(Command):
-    """Recompile Notebook CSS
-    
-    Regenerate the compiled CSS from LESS sources.
-    
-    Requires various dev dependencies, such as fabric and lessc.
-    """
-    description = "Recompile Notebook CSS"
-    user_options = []
-    
-    def initialize_options(self):
-        pass
-    
-    def finalize_options(self):
-        pass
-    
-    def run(self):
-        call("fab css", shell=True, cwd=pjoin(repo_root, "IPython", "html"))
-
-class JavascriptVersion(Command):
-    """write the javascript version to notebook javascript"""
-    description = "Write IPython version to javascript"
-    user_options = []
-    
-    def initialize_options(self):
-        pass
-    
-    def finalize_options(self):
-        pass
-    
-    def run(self):
-        nsfile = pjoin(repo_root, "IPython", "html", "static", "base", "js", "namespace.js")
-        with open(nsfile) as f:
-            lines = f.readlines()
-        with open(nsfile, 'w') as f:
-            for line in lines:
-                if line.startswith("IPython.version"):
-                    line = 'IPython.version = "{0}";\n'.format(version)
-                f.write(line)
-            

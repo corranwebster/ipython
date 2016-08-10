@@ -12,6 +12,7 @@ Configuring IPython
 
    intro
    options/index
+   shortcuts/index
    details
 
 .. seealso::
@@ -27,4 +28,7 @@ Extending and integrating with IPython
 
    extensions/index
    integrating
+   custommagics
    inputtransforms
+   callbacks
+   eventloops

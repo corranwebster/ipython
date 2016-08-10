@@ -1,18 +1,8 @@
 # encoding: utf-8
 """Tests for IPython.utils.path.py"""
 
-#-----------------------------------------------------------------------------
-#  Copyright (C) 2008-2011  The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
-
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
-
-from __future__ import with_statement
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 
 import errno
 import os
@@ -22,13 +12,20 @@ import tempfile
 import warnings
 from contextlib import contextmanager
 
+try:  # Python 3.3+
+    from unittest.mock import patch
+except ImportError:
+    from mock import patch
+
 from os.path import join, abspath, split
 
+from nose import SkipTest
 import nose.tools as nt
 
 from nose import with_setup
 
 import IPython
+from IPython import paths
 from IPython.testing import decorators as dec
 from IPython.testing.decorators import (skip_if_not_win32, skip_win32,
                                         onlyif_unicode_paths,)
@@ -64,12 +61,8 @@ except NameError:   # Python 3
 # Globals
 #-----------------------------------------------------------------------------
 env = os.environ
-TEST_FILE_PATH = split(abspath(__file__))[0]
 TMP_TEST_DIR = tempfile.mkdtemp()
 HOME_TEST_DIR = join(TMP_TEST_DIR, "home_test_dir")
-XDG_TEST_DIR = join(HOME_TEST_DIR, "xdg_test_dir")
-XDG_CACHE_DIR = join(HOME_TEST_DIR, "xdg_cache_dir")
-IP_TEST_DIR = join(HOME_TEST_DIR,'.ipython')
 #
 # Setup/teardown functions/decorators
 #
@@ -81,9 +74,7 @@ def setup():
     """
     # Do not mask exceptions here.  In particular, catching WindowsError is a
     # problem because that exception is only defined on Windows...
-    os.makedirs(IP_TEST_DIR)
-    os.makedirs(os.path.join(XDG_TEST_DIR, 'ipython'))
-    os.makedirs(os.path.join(XDG_CACHE_DIR, 'ipython'))
+    os.makedirs(os.path.join(HOME_TEST_DIR, 'ipython'))
 
 
 def teardown():
@@ -107,10 +98,6 @@ def setup_environment():
     global oldstuff, platformstuff
     oldstuff = (env.copy(), os.name, sys.platform, path.get_home_dir, IPython.__file__, os.getcwd())
 
-    if os.name == 'nt':
-        platformstuff = (wreg.OpenKey, wreg.QueryValueEx,)
-
-
 def teardown_environment():
     """Restore things that were remembered by the setup_environment function
     """
@@ -124,20 +111,9 @@ def teardown_environment():
     env.update(oldenv)
     if hasattr(sys, 'frozen'):
         del sys.frozen
-    if os.name == 'nt':
-        (wreg.OpenKey, wreg.QueryValueEx,) = platformstuff
 
 # Build decorator that uses the setup_environment/setup_environment
 with_environment = with_setup(setup_environment, teardown_environment)
-
-@contextmanager
-def patch_get_home_dir(dirpath):
-    orig_get_home_dir = path.get_home_dir
-    path.get_home_dir = lambda : dirpath
-    try:
-        yield
-    finally:
-        path.get_home_dir = orig_get_home_dir
 
 @skip_if_not_win32
 @with_environment
@@ -193,7 +169,6 @@ def test_get_home_dir_5():
     os.name = 'posix'
     nt.assert_raises(path.HomeDirError, path.get_home_dir, True)
 
-
 # Should we stub wreg fully so we can run the test on all platforms?
 @skip_if_not_win32
 @with_environment
@@ -207,149 +182,14 @@ def test_get_home_dir_8():
     for key in ['HOME', 'HOMESHARE', 'HOMEDRIVE', 'HOMEPATH', 'USERPROFILE']:
         env.pop(key, None)
 
-    #Stub windows registry functions
-    def OpenKey(x, y):
-        class key:
-            def Close(self):
-                pass
-        return key()
-    def QueryValueEx(x, y):
-        return [abspath(HOME_TEST_DIR)]
+    class key:
+        def Close(self):
+            pass
 
-    wreg.OpenKey = OpenKey
-    wreg.QueryValueEx = QueryValueEx
-
-    home_dir = path.get_home_dir()
+    with patch.object(wreg, 'OpenKey', return_value=key()), \
+         patch.object(wreg, 'QueryValueEx', return_value=[abspath(HOME_TEST_DIR)]):
+        home_dir = path.get_home_dir()
     nt.assert_equal(home_dir, abspath(HOME_TEST_DIR))
-
-
-@with_environment
-def test_get_ipython_dir_1():
-    """test_get_ipython_dir_1, Testcase to see if we can call get_ipython_dir without Exceptions."""
-    env_ipdir = os.path.join("someplace", ".ipython")
-    path._writable_dir = lambda path: True
-    env['IPYTHONDIR'] = env_ipdir
-    ipdir = path.get_ipython_dir()
-    nt.assert_equal(ipdir, env_ipdir)
-
-
-@with_environment
-def test_get_ipython_dir_2():
-    """test_get_ipython_dir_2, Testcase to see if we can call get_ipython_dir without Exceptions."""
-    with patch_get_home_dir('someplace'):
-        path.get_xdg_dir = lambda : None
-        path._writable_dir = lambda path: True
-        os.name = "posix"
-        env.pop('IPYTHON_DIR', None)
-        env.pop('IPYTHONDIR', None)
-        env.pop('XDG_CONFIG_HOME', None)
-        ipdir = path.get_ipython_dir()
-        nt.assert_equal(ipdir, os.path.join("someplace", ".ipython"))
-
-@with_environment
-def test_get_ipython_dir_3():
-    """test_get_ipython_dir_3, move XDG if defined, and .ipython doesn't exist."""
-    tmphome = TemporaryDirectory()
-    try:
-        with patch_get_home_dir(tmphome.name):
-            os.name = "posix"
-            env.pop('IPYTHON_DIR', None)
-            env.pop('IPYTHONDIR', None)
-            env['XDG_CONFIG_HOME'] = XDG_TEST_DIR
-
-            with warnings.catch_warnings(record=True) as w:
-                ipdir = path.get_ipython_dir()
-
-            nt.assert_equal(ipdir, os.path.join(tmphome.name, ".ipython"))
-            if sys.platform != 'darwin':
-                nt.assert_equal(len(w), 1)
-                nt.assert_in('Moving', str(w[0]))
-    finally:
-        tmphome.cleanup()
-
-@with_environment
-def test_get_ipython_dir_4():
-    """test_get_ipython_dir_4, warn if XDG and home both exist."""
-    with patch_get_home_dir(HOME_TEST_DIR):
-        os.name = "posix"
-        env.pop('IPYTHON_DIR', None)
-        env.pop('IPYTHONDIR', None)
-        env['XDG_CONFIG_HOME'] = XDG_TEST_DIR
-        try:
-            os.mkdir(os.path.join(XDG_TEST_DIR, 'ipython'))
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                raise
-
-        with warnings.catch_warnings(record=True) as w:
-            ipdir = path.get_ipython_dir()
-
-        nt.assert_equal(ipdir, os.path.join(HOME_TEST_DIR, ".ipython"))
-        if sys.platform != 'darwin':
-            nt.assert_equal(len(w), 1)
-            nt.assert_in('Ignoring', str(w[0]))
-
-@with_environment
-def test_get_ipython_dir_5():
-    """test_get_ipython_dir_5, use .ipython if exists and XDG defined, but doesn't exist."""
-    with patch_get_home_dir(HOME_TEST_DIR):
-        os.name = "posix"
-        env.pop('IPYTHON_DIR', None)
-        env.pop('IPYTHONDIR', None)
-        env['XDG_CONFIG_HOME'] = XDG_TEST_DIR
-        try:
-            os.rmdir(os.path.join(XDG_TEST_DIR, 'ipython'))
-        except OSError as e:
-            if e.errno != errno.ENOENT:
-                raise
-        ipdir = path.get_ipython_dir()
-        nt.assert_equal(ipdir, IP_TEST_DIR)
-
-@with_environment
-def test_get_ipython_dir_6():
-    """test_get_ipython_dir_6, use home over XDG if defined and neither exist."""
-    xdg = os.path.join(HOME_TEST_DIR, 'somexdg')
-    os.mkdir(xdg)
-    shutil.rmtree(os.path.join(HOME_TEST_DIR, '.ipython'))
-    with patch_get_home_dir(HOME_TEST_DIR):
-        orig_get_xdg_dir = path.get_xdg_dir
-        path.get_xdg_dir = lambda : xdg
-        try:
-            os.name = "posix"
-            env.pop('IPYTHON_DIR', None)
-            env.pop('IPYTHONDIR', None)
-            env.pop('XDG_CONFIG_HOME', None)
-            with warnings.catch_warnings(record=True) as w:
-                ipdir = path.get_ipython_dir()
-
-            nt.assert_equal(ipdir, os.path.join(HOME_TEST_DIR, '.ipython'))
-            nt.assert_equal(len(w), 0)
-        finally:
-            path.get_xdg_dir = orig_get_xdg_dir
-
-@with_environment
-def test_get_ipython_dir_7():
-    """test_get_ipython_dir_7, test home directory expansion on IPYTHONDIR"""
-    path._writable_dir = lambda path: True
-    home_dir = os.path.normpath(os.path.expanduser('~'))
-    env['IPYTHONDIR'] = os.path.join('~', 'somewhere')
-    ipdir = path.get_ipython_dir()
-    nt.assert_equal(ipdir, os.path.join(home_dir, 'somewhere'))
-
-@skip_win32
-@with_environment
-def test_get_ipython_dir_8():
-    """test_get_ipython_dir_8, test / home directory"""
-    old = path._writable_dir, path.get_xdg_dir
-    try:
-        path._writable_dir = lambda path: bool(path)
-        path.get_xdg_dir = lambda: None
-        env.pop('IPYTHON_DIR', None)
-        env.pop('IPYTHONDIR', None)
-        env['HOME'] = '/'
-        nt.assert_equal(path.get_ipython_dir(), '/.ipython')
-    finally:
-        path._writable_dir, path.get_xdg_dir = old
 
 @with_environment
 def test_get_xdg_dir_0():
@@ -414,39 +254,9 @@ def test_filefind():
     """Various tests for filefind"""
     f = tempfile.NamedTemporaryFile()
     # print 'fname:',f.name
-    alt_dirs = path.get_ipython_dir()
+    alt_dirs = paths.get_ipython_dir()
     t = path.filefind(f.name, alt_dirs)
     # print 'found:',t
-
-@with_environment
-def test_get_ipython_cache_dir():
-    os.environ["HOME"] = HOME_TEST_DIR
-    if os.name == 'posix' and sys.platform != 'darwin':
-        # test default
-        os.makedirs(os.path.join(HOME_TEST_DIR, ".cache"))
-        os.environ.pop("XDG_CACHE_HOME", None)
-        ipdir = path.get_ipython_cache_dir()
-        nt.assert_equal(os.path.join(HOME_TEST_DIR, ".cache", "ipython"),
-                        ipdir)
-        nt.assert_true(os.path.isdir(ipdir))
-
-        # test env override
-        os.environ["XDG_CACHE_HOME"] = XDG_CACHE_DIR
-        ipdir = path.get_ipython_cache_dir()
-        nt.assert_true(os.path.isdir(ipdir))
-        nt.assert_equal(ipdir, os.path.join(XDG_CACHE_DIR, "ipython"))
-    else:
-        nt.assert_equal(path.get_ipython_cache_dir(),
-                        path.get_ipython_dir())
-
-def test_get_ipython_package_dir():
-    ipdir = path.get_ipython_package_dir()
-    nt.assert_true(os.path.isdir(ipdir))
-
-
-def test_get_ipython_module_path():
-    ipapp_path = path.get_ipython_module_path('IPython.terminal.ipapp')
-    nt.assert_true(os.path.isfile(ipapp_path))
 
 
 @dec.skip_if_not_win32
@@ -479,47 +289,36 @@ def test_not_writable_ipdir():
     env.pop('XDG_CONFIG_HOME', None)
     env['HOME'] = tmpdir
     ipdir = os.path.join(tmpdir, '.ipython')
-    os.mkdir(ipdir)
-    os.chmod(ipdir, 600)
+    os.mkdir(ipdir, 0o555)
+    try:
+        open(os.path.join(ipdir, "_foo_"), 'w').close()
+    except IOError:
+        pass
+    else:
+        # I can still write to an unwritable dir,
+        # assume I'm root and skip the test
+        raise SkipTest("I can't create directories that I can't write to")
     with AssertPrints('is not a writable location', channel='stderr'):
-        ipdir = path.get_ipython_dir()
+        ipdir = paths.get_ipython_dir()
     env.pop('IPYTHON_DIR', None)
-
-def test_unquote_filename():
-    for win32 in (True, False):
-        nt.assert_equal(path.unquote_filename('foo.py', win32=win32), 'foo.py')
-        nt.assert_equal(path.unquote_filename('foo bar.py', win32=win32), 'foo bar.py')
-    nt.assert_equal(path.unquote_filename('"foo.py"', win32=True), 'foo.py')
-    nt.assert_equal(path.unquote_filename('"foo bar.py"', win32=True), 'foo bar.py')
-    nt.assert_equal(path.unquote_filename("'foo.py'", win32=True), 'foo.py')
-    nt.assert_equal(path.unquote_filename("'foo bar.py'", win32=True), 'foo bar.py')
-    nt.assert_equal(path.unquote_filename('"foo.py"', win32=False), '"foo.py"')
-    nt.assert_equal(path.unquote_filename('"foo bar.py"', win32=False), '"foo bar.py"')
-    nt.assert_equal(path.unquote_filename("'foo.py'", win32=False), "'foo.py'")
-    nt.assert_equal(path.unquote_filename("'foo bar.py'", win32=False), "'foo bar.py'")
 
 @with_environment
 def test_get_py_filename():
     os.chdir(TMP_TEST_DIR)
-    for win32 in (True, False):
-        with make_tempfile('foo.py'):
-            nt.assert_equal(path.get_py_filename('foo.py', force_win32=win32), 'foo.py')
-            nt.assert_equal(path.get_py_filename('foo', force_win32=win32), 'foo.py')
-        with make_tempfile('foo'):
-            nt.assert_equal(path.get_py_filename('foo', force_win32=win32), 'foo')
-            nt.assert_raises(IOError, path.get_py_filename, 'foo.py', force_win32=win32)
-        nt.assert_raises(IOError, path.get_py_filename, 'foo', force_win32=win32)
-        nt.assert_raises(IOError, path.get_py_filename, 'foo.py', force_win32=win32)
-        true_fn = 'foo with spaces.py'
-        with make_tempfile(true_fn):
-            nt.assert_equal(path.get_py_filename('foo with spaces', force_win32=win32), true_fn)
-            nt.assert_equal(path.get_py_filename('foo with spaces.py', force_win32=win32), true_fn)
-            if win32:
-                nt.assert_equal(path.get_py_filename('"foo with spaces.py"', force_win32=True), true_fn)
-                nt.assert_equal(path.get_py_filename("'foo with spaces.py'", force_win32=True), true_fn)
-            else:
-                nt.assert_raises(IOError, path.get_py_filename, '"foo with spaces.py"', force_win32=False)
-                nt.assert_raises(IOError, path.get_py_filename, "'foo with spaces.py'", force_win32=False)
+    with make_tempfile('foo.py'):
+        nt.assert_equal(path.get_py_filename('foo.py'), 'foo.py')
+        nt.assert_equal(path.get_py_filename('foo'), 'foo.py')
+    with make_tempfile('foo'):
+        nt.assert_equal(path.get_py_filename('foo'), 'foo')
+        nt.assert_raises(IOError, path.get_py_filename, 'foo.py')
+    nt.assert_raises(IOError, path.get_py_filename, 'foo')
+    nt.assert_raises(IOError, path.get_py_filename, 'foo.py')
+    true_fn = 'foo with spaces.py'
+    with make_tempfile(true_fn):
+        nt.assert_equal(path.get_py_filename('foo with spaces'), true_fn)
+        nt.assert_equal(path.get_py_filename('foo with spaces.py'), true_fn)
+        nt.assert_raises(IOError, path.get_py_filename, '"foo with spaces.py"')
+        nt.assert_raises(IOError, path.get_py_filename, "'foo with spaces.py'")
 
 @onlyif_unicode_paths
 def test_unicode_in_filename():
@@ -611,6 +410,17 @@ def test_unescape_glob():
     nt.assert_equals(path.unescape_glob(r'\a'), r'\a')
 
 
+def test_ensure_dir_exists():
+    with TemporaryDirectory() as td:
+        d = os.path.join(td, u'∂ir')
+        path.ensure_dir_exists(d) # create it
+        assert os.path.isdir(d)
+        path.ensure_dir_exists(d) # no-op
+        f = os.path.join(td, u'ƒile')
+        open(f, 'w').close() # touch
+        with nt.assert_raises(IOError):
+            path.ensure_dir_exists(f)
+
 class TestLinkOrCopy(object):
     def setUp(self):
         self.tempdir = TemporaryDirectory()
@@ -675,3 +485,12 @@ class TestLinkOrCopy(object):
         dst = self.dst("target")
         path.link_or_copy(self.src, dst)
         self.assert_content_equal(self.src, dst)
+
+    def test_link_twice(self):
+        # Linking the same file twice shouldn't leave duplicates around.
+        # See https://github.com/ipython/ipython/issues/6450
+        dst = self.dst('target')
+        path.link_or_copy(self.src, dst)
+        path.link_or_copy(self.src, dst)
+        self.assert_inode_equal(self.src, dst)
+        nt.assert_equal(sorted(os.listdir(self.tempdir.name)), ['src', 'target'])

@@ -2,39 +2,21 @@
 """Displayhook for IPython.
 
 This defines a callable class that IPython uses for `sys.displayhook`.
-
-Authors:
-
-* Fernando Perez
-* Brian Granger
-* Robert Kern
 """
 
-#-----------------------------------------------------------------------------
-#       Copyright (C) 2008-2011 The IPython Development Team
-#       Copyright (C) 2001-2007 Fernando Perez <fperez@colorado.edu>
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
 from __future__ import print_function
 
 import sys
+import io as _io
+import tokenize
 
-
-from IPython.config.configurable import Configurable
-from IPython.utils import io
-from IPython.utils.py3compat import builtin_mod
-from IPython.utils.traitlets import Instance
-from IPython.utils.warn import warn
-
-#-----------------------------------------------------------------------------
-# Main displayhook class
-#-----------------------------------------------------------------------------
+from traitlets.config.configurable import Configurable
+from IPython.utils.py3compat import builtin_mod, cast_unicode_py2
+from traitlets import Instance, Float
+from warnings import warn
 
 # TODO: Move the various attributes (cache_size, [others now moved]). Some
 # of these are also attributes of InteractiveShell. They should be on ONE object
@@ -47,11 +29,14 @@ class DisplayHook(Configurable):
     that gets called anytime user code returns a value.
     """
 
-    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
+    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC',
+                     allow_none=True)
+    exec_result = Instance('IPython.core.interactiveshell.ExecutionResult',
+                           allow_none=True)
+    cull_fraction = Float(0.2)
 
     def __init__(self, shell=None, cache_size=1000, **kwargs):
         super(DisplayHook, self).__init__(shell=shell, **kwargs)
-
         cache_size_min = 3
         if cache_size <= 0:
             self.do_full_cache = 0
@@ -98,14 +83,23 @@ class DisplayHook(Configurable):
     def quiet(self):
         """Should we silence the display hook because of ';'?"""
         # do not print output if input ends in ';'
+        
         try:
-            cell = self.shell.history_manager.input_hist_parsed[self.prompt_count]
-            if cell.rstrip().endswith(';'):
-                return True
+            cell = cast_unicode_py2(self.shell.history_manager.input_hist_parsed[-1])
         except IndexError:
             # some uses of ipshellembed may fail here
-            pass
-        return False
+            return False
+        
+        sio = _io.StringIO(cell)
+        tokens = list(tokenize.generate_tokens(sio.readline))
+
+        for token in reversed(tokens):
+            if token[0] in (tokenize.ENDMARKER, tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT):
+                continue
+            if (token[0] == tokenize.OP) and (token[1] == ';'):
+                return True
+            else:
+                return False
 
     def start_displayhook(self):
         """Start the displayhook, initializing resources."""
@@ -115,13 +109,13 @@ class DisplayHook(Configurable):
         """Write the output prompt.
 
         The default implementation simply writes the prompt to
-        ``io.stdout``.
+        ``sys.stdout``.
         """
         # Use write, not print which adds an extra space.
-        io.stdout.write(self.shell.separate_out)
-        outprompt = self.shell.prompt_manager.render('out')
+        sys.stdout.write(self.shell.separate_out)
+        outprompt = 'Out[{}]: '.format(self.shell.execution_count)
         if self.do_full_cache:
-            io.stdout.write(outprompt)
+            sys.stdout.write(outprompt)
 
     def compute_format_data(self, result):
         """Compute format data of the object to be displayed.
@@ -155,11 +149,14 @@ class DisplayHook(Configurable):
         """
         return self.shell.display_formatter.format(result)
 
+    # This can be set to True by the write_output_prompt method in a subclass
+    prompt_end_newline = False
+
     def write_format_data(self, format_dict, md_dict=None):
         """Write the format data dict to the frontend.
 
         This default version of this method simply writes the plain text
-        representation of the object to ``io.stdout``. Subclasses should
+        representation of the object to ``sys.stdout``. Subclasses should
         override this method to send the entire `format_dict` to the
         frontends.
 
@@ -170,6 +167,9 @@ class DisplayHook(Configurable):
         md_dict : dict (optional)
             The metadata dict to be associated with the display data.
         """
+        if 'text/plain' not in format_dict:
+            # nothing to do
+            return
         # We want to print because we want to always make sure we have a
         # newline, even if all the prompt separators are ''. This is the
         # standard IPython behavior.
@@ -182,12 +182,11 @@ class DisplayHook(Configurable):
             # because the expansion may add ANSI escapes that will interfere
             # with our ability to determine whether or not we should add
             # a newline.
-            prompt_template = self.shell.prompt_manager.out_template
-            if prompt_template and not prompt_template.endswith('\n'):
+            if not self.prompt_end_newline:
                 # But avoid extraneous empty lines.
                 result_repr = '\n' + result_repr
 
-        print(result_repr, file=io.stdout)
+        print(result_repr)
 
     def update_user_ns(self, result):
         """Update user_ns with various things like _, __, _1, etc."""
@@ -195,13 +194,7 @@ class DisplayHook(Configurable):
         # Avoid recursive reference when displaying _oh/Out
         if result is not self.shell.user_ns['_oh']:
             if len(self.shell.user_ns['_oh']) >= self.cache_size and self.do_full_cache:
-                warn('Output cache limit (currently '+
-                      repr(self.cache_size)+' entries) hit.\n'
-                     'Flushing cache and resetting history counter...\n'
-                     'The only history variables available will be _,__,___ and _1\n'
-                     'with the current result.')
-
-                self.flush()
+                self.cull_cache()
             # Don't overwrite '_' and friends if '_' is in __builtin__ (otherwise
             # we cause buggy behavior for things like gettext).
 
@@ -221,8 +214,15 @@ class DisplayHook(Configurable):
                 self.shell.push(to_main, interactive=False)
                 self.shell.user_ns['_oh'][self.prompt_count] = result
 
+    def fill_exec_result(self, result):
+        if self.exec_result is not None:
+            self.exec_result.result = result
+
     def log_output(self, format_dict):
         """Log the output."""
+        if 'text/plain' not in format_dict:
+            # nothing to do
+            return
         if self.shell.logger.log_output:
             self.shell.logger.log_write(format_dict['text/plain'], 'output')
         self.shell.history_manager.output_hist_reprs[self.prompt_count] = \
@@ -230,8 +230,8 @@ class DisplayHook(Configurable):
 
     def finish_displayhook(self):
         """Finish up all displayhook activities."""
-        io.stdout.write(self.shell.separate_out2)
-        io.stdout.flush()
+        sys.stdout.write(self.shell.separate_out2)
+        sys.stdout.flush()
 
     def __call__(self, result=None):
         """Printing with history cache management.
@@ -241,21 +241,30 @@ class DisplayHook(Configurable):
         """
         self.check_for_underscore()
         if result is not None and not self.quiet():
-            # If _ipython_display_ is defined, use that to display this object.
-            display_method = getattr(result, '_ipython_display_', None)
-            if display_method is not None:
-                try:
-                    return display_method()
-                except NotImplementedError:
-                    pass
-            
             self.start_displayhook()
             self.write_output_prompt()
             format_dict, md_dict = self.compute_format_data(result)
-            self.write_format_data(format_dict, md_dict)
             self.update_user_ns(result)
-            self.log_output(format_dict)
+            self.fill_exec_result(result)
+            if format_dict:
+                self.write_format_data(format_dict, md_dict)
+                self.log_output(format_dict)
             self.finish_displayhook()
+
+    def cull_cache(self):
+        """Output cache is full, cull the oldest entries"""
+        oh = self.shell.user_ns.get('_oh', {})
+        sz = len(oh)
+        cull_count = max(int(sz * self.cull_fraction), 2)
+        warn('Output cache limit (currently {sz} entries) hit.\n'
+             'Flushing oldest {cull_count} entries.'.format(sz=sz, cull_count=cull_count))
+        
+        for i, n in enumerate(sorted(oh)):
+            if i >= cull_count:
+                break
+            self.shell.user_ns.pop('_%i' % n, None)
+            oh.pop(n, None)
+        
 
     def flush(self):
         if not self.do_full_cache:
@@ -284,4 +293,3 @@ class DisplayHook(Configurable):
         # IronPython blocks here forever
         if sys.platform != "cli":
             gc.collect()
-

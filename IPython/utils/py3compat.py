@@ -4,11 +4,11 @@ import functools
 import os
 import sys
 import re
+import shutil
 import types
+import platform
 
 from .encoding import DEFAULT_ENCODING
-
-orig_open = open
 
 def no_code(x, encoding=None):
     return x
@@ -32,6 +32,12 @@ def cast_bytes(s, encoding=None):
         return encode(s, encoding)
     return s
 
+def buffer_to_bytes(buf):
+    """Cast a buffer object to bytes"""
+    if not isinstance(buf, bytes):
+        buf = bytes(buf)
+    return buf
+
 def _modify_str_or_docstring(str_change_func):
     @functools.wraps(str_change_func)
     def wrapper(func_or_str):
@@ -42,7 +48,9 @@ def _modify_str_or_docstring(str_change_func):
             func = func_or_str
             doc = func.__doc__
         
-        doc = str_change_func(doc)
+        # PYTHONOPTIMIZE=2 strips docstrings, so they can disappear unexpectedly
+        if doc is not None:
+            doc = str_change_func(doc)
         
         if func:
             func.__doc__ = doc
@@ -71,6 +79,70 @@ def safe_unicode(e):
 
     return u'Unrecoverably corrupt evalue'
 
+# shutil.which from Python 3.4
+def _shutil_which(cmd, mode=os.F_OK | os.X_OK, path=None):
+    """Given a command, mode, and a PATH string, return the path which
+    conforms to the given mode on the PATH, or None if there is no such
+    file.
+
+    `mode` defaults to os.F_OK | os.X_OK. `path` defaults to the result
+    of os.environ.get("PATH"), or can be overridden with a custom search
+    path.
+    
+    This is a backport of shutil.which from Python 3.4
+    """
+    # Check that a given file can be accessed with the correct mode.
+    # Additionally check that `file` is not a directory, as on Windows
+    # directories pass the os.access check.
+    def _access_check(fn, mode):
+        return (os.path.exists(fn) and os.access(fn, mode)
+                and not os.path.isdir(fn))
+
+    # If we're given a path with a directory part, look it up directly rather
+    # than referring to PATH directories. This includes checking relative to the
+    # current directory, e.g. ./script
+    if os.path.dirname(cmd):
+        if _access_check(cmd, mode):
+            return cmd
+        return None
+
+    if path is None:
+        path = os.environ.get("PATH", os.defpath)
+    if not path:
+        return None
+    path = path.split(os.pathsep)
+
+    if sys.platform == "win32":
+        # The current directory takes precedence on Windows.
+        if not os.curdir in path:
+            path.insert(0, os.curdir)
+
+        # PATHEXT is necessary to check on Windows.
+        pathext = os.environ.get("PATHEXT", "").split(os.pathsep)
+        # See if the given file matches any of the expected path extensions.
+        # This will allow us to short circuit when given "python.exe".
+        # If it does match, only test that one, otherwise we have to try
+        # others.
+        if any(cmd.lower().endswith(ext.lower()) for ext in pathext):
+            files = [cmd]
+        else:
+            files = [cmd + ext for ext in pathext]
+    else:
+        # On other platforms you don't have things like PATHEXT to tell you
+        # what file suffixes are executable, so just pass on cmd as-is.
+        files = [cmd]
+
+    seen = set()
+    for dir in path:
+        normdir = os.path.normcase(dir)
+        if not normdir in seen:
+            seen.add(normdir)
+            for thefile in files:
+                name = os.path.join(dir, thefile)
+                if _access_check(name, mode):
+                    return name
+    return None
+
 if sys.version_info[0] >= 3:
     PY3 = True
     
@@ -88,27 +160,30 @@ if sys.version_info[0] >= 3:
     bytes_to_str = decode
     cast_bytes_py2 = no_code
     cast_unicode_py2 = no_code
+    buffer_to_bytes_py2 = no_code
     
     string_types = (str,)
     unicode_type = str
+    
+    which = shutil.which
     
     def isidentifier(s, dotted=False):
         if dotted:
             return all(isidentifier(a) for a in s.split("."))
         return s.isidentifier()
-    
-    open = orig_open
+
     xrange = range
     def iteritems(d): return iter(d.items())
     def itervalues(d): return iter(d.values())
     getcwd = os.getcwd
     
     MethodType = types.MethodType
-    
-    def execfile(fname, glob, loc=None):
+
+    def execfile(fname, glob, loc=None, compiler=None):
         loc = loc if (loc is not None) else glob
         with open(fname, 'rb') as f:
-            exec(compile(f.read(), fname, 'exec'), glob, loc)
+            compiler = compiler or compile
+            exec(compiler(f.read(), fname, 'exec'), glob, loc)
     
     # Refactor print statements in doctests.
     _print_statement_re = re.compile(r"\bprint (?P<expr>.*)$", re.MULTILINE)
@@ -131,6 +206,10 @@ if sys.version_info[0] >= 3:
         
         Accepts a string or a function, so it can be used as a decorator."""
         return s.format(u='')
+    
+    def get_closure(f):
+        """Get a function's closure attribute"""
+        return f.__closure__
 
 else:
     PY3 = False
@@ -149,6 +228,7 @@ else:
     bytes_to_str = no_code
     cast_bytes_py2 = cast_bytes
     cast_unicode_py2 = cast_unicode
+    buffer_to_bytes_py2 = buffer_to_bytes
     
     string_types = (str, unicode)
     unicode_type = unicode
@@ -159,27 +239,6 @@ else:
         if dotted:
             return all(isidentifier(a) for a in s.split("."))
         return bool(_name_re.match(s))
-    
-    class open(object):
-        """Wrapper providing key part of Python 3 open() interface."""
-        def __init__(self, fname, mode="r", encoding="utf-8"):
-            self.f = orig_open(fname, mode)
-            self.enc = encoding
-        
-        def write(self, s):
-            return self.f.write(s.encode(self.enc))
-        
-        def read(self, size=-1):
-            return self.f.read(size).decode(self.enc)
-        
-        def close(self):
-            return self.f.close()
-        
-        def __enter__(self):
-            return self
-        
-        def __exit__(self, etype, value, traceback):
-            self.f.close()
     
     xrange = xrange
     def iteritems(d): return d.iteritems()
@@ -192,6 +251,11 @@ else:
     def doctest_refactor_print(func_or_str):
         return func_or_str
 
+    def get_closure(f):
+        """Get a function's closure attribute"""
+        return f.func_closure
+    
+    which = _shutil_which
 
     # Abstract u'abc' syntax:
     @_modify_str_or_docstring
@@ -202,26 +266,34 @@ else:
         return s.format(u='u')
 
     if sys.platform == 'win32':
-        def execfile(fname, glob=None, loc=None):
+        def execfile(fname, glob=None, loc=None, compiler=None):
             loc = loc if (loc is not None) else glob
-            # The rstrip() is necessary b/c trailing whitespace in files will
-            # cause an IndentationError in Python 2.6 (this was fixed in 2.7,
-            # but we still support 2.6).  See issue 1027.
-            scripttext = builtin_mod.open(fname).read().rstrip() + '\n'
+            scripttext = builtin_mod.open(fname).read()+ '\n'
             # compile converts unicode filename to str assuming
             # ascii. Let's do the conversion before calling compile
             if isinstance(fname, unicode):
                 filename = unicode_to_str(fname)
             else:
                 filename = fname
-            exec(compile(scripttext, filename, 'exec'), glob, loc)
+            compiler = compiler or compile
+            exec(compiler(scripttext, filename, 'exec'), glob, loc)
+
     else:
-        def execfile(fname, *where):
+        def execfile(fname, glob=None, loc=None, compiler=None):
             if isinstance(fname, unicode):
                 filename = fname.encode(sys.getfilesystemencoding())
             else:
                 filename = fname
-            builtin_mod.execfile(filename, *where)
+            where = [ns for ns in [glob, loc] if ns is not None]
+            if compiler is None:
+                builtin_mod.execfile(filename, *where)
+            else:
+                scripttext = builtin_mod.open(fname).read().rstrip() + '\n'
+                exec(compiler(scripttext, filename, 'exec'), glob, loc)
+
+
+PY2 = not PY3
+PYPY = platform.python_implementation() == "PyPy"
 
 
 def annotate(**kwargs):

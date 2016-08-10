@@ -24,6 +24,18 @@ the default profile such that:
  * turn ``%autocall`` to full mode
 
 
+Environment variables
+=====================
+
+Rather than manipulating os.environ directly, you may like to use the magic
+`%env` command.  With no arguments, this displays all environment variables
+and values.  To get the value of a specific variable, use `%env var`.  To set
+the value of a specific variable, use `%env foo bar`, `%env foo=bar`.  By
+default values are considered to be strings so quoting them is unnecessary.
+However, Python variables are expanded as usual in the magic command, so
+`%env foo=$bar` means "set the environment variable foo to the value of the
+Python variable `bar`".
+
 Aliases
 =======
 
@@ -36,7 +48,7 @@ See ``%alias?``  and ``%unalias?`` for details on the alias facilities. See also
 Directory management
 ====================
 
-Since each command passed by ipython to the underlying system is executed
+Since each command passed by IPython to the underlying system is executed
 in a subshell which exits immediately, you can NOT use !cd to navigate
 the filesystem.
 
@@ -51,23 +63,8 @@ switching to any of them. Type ``cd?`` for more details.
 Prompt customization
 ====================
 
-Here are some prompt configurations you can try out interactively by using the
-``%config`` magic::
-    
-    %config PromptManager.in_template = r'{color.LightGreen}\u@\h{color.LightBlue}[{color.LightCyan}\Y1{color.LightBlue}]{color.Green}|\#> '
-    %config PromptManager.in2_template = r'{color.Green}|{color.LightGreen}\D{color.Green}> '
-    %config PromptManager.out_template = r'<\#> '
+See :ref:`custom_prompts`.
 
-
-You can change the prompt configuration to your liking permanently by editing
-``ipython_config.py``::
-    
-    c.PromptManager.in_template = r'{color.LightGreen}\u@\h{color.LightBlue}[{color.LightCyan}\Y1{color.LightBlue}]{color.Green}|\#> '
-    c.PromptManager.in2_template = r'{color.Green}|{color.LightGreen}\D{color.Green}> '
-    c.PromptManager.out_template = r'<\#> '
-
-Read more about the :ref:`configuration system <config_overview>` for details
-on how to find ``ipython_config.py``.
 
 .. _string_lists:
 
@@ -154,7 +151,7 @@ for lists if files), use the .s property::
     [Q:doc/examples]|15> ls $files
     example-demo.py  example-gnuplot.py  extension.py  seteditor.py  seteditor.pyc
 
-SLists are inherited from normal python lists, so every list method is
+SLists are inherited from normal Python lists, so every list method is
 available::
 
     [Q:doc/examples]|21> lines.append('hey')
@@ -187,7 +184,7 @@ First, capture output of "hg status"::
     11: build\bdist.win32\winexe\temp\_hashlib.py
     12: build\bdist.win32\winexe\temp\_socket.py
 
-Now we can just remove these files by doing 'rm $junk.s'. 
+Now we can just remove these files by doing 'rm $junk.s'.
 
 The .s, .n, .p properties
 -------------------------

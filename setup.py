@@ -14,7 +14,7 @@ requires utilities which are not available under Windows."""
 #
 #  Distributed under the terms of the Modified BSD License.
 #
-#  The full license is in the file COPYING.txt, distributed with this software.
+#  The full license is in the file COPYING.rst, distributed with this software.
 #-----------------------------------------------------------------------------
 
 #-----------------------------------------------------------------------------
@@ -26,8 +26,9 @@ import sys
 
 # This check is also made in IPython/__init__, don't forget to update both when
 # changing Python version requirements.
-if sys.version_info[:2] < (2,7):
-    error = "ERROR: IPython requires Python Version 2.7 or above."
+v = sys.version_info
+if v[:2] < (2,7) or (v[0] >= 3 and v[:2] < (3,3)):
+    error = "ERROR: IPython requires Python version 2.7 or 3.3 or above."
     print(error, file=sys.stderr)
     sys.exit(1)
 
@@ -41,7 +42,6 @@ PY3 = (sys.version_info[0] >= 3)
 
 # Stdlib imports
 import os
-import shutil
 
 from glob import glob
 
@@ -58,42 +58,19 @@ from setupbase import (
     setup_args,
     find_packages,
     find_package_data,
+    check_package_data_first,
     find_entry_points,
     build_scripts_entrypt,
     find_data_files,
-    check_for_dependencies,
     git_prebuild,
-    check_submodule_status,
-    update_submodules,
-    require_submodules,
-    UpdateSubmodules,
-    get_bdist_wheel,
-    CompileCSS,
-    JavascriptVersion,
     install_symlinked,
     install_lib_symlink,
     install_scripts_for_symlink,
     unsymlink,
 )
-from setupext import setupext
 
 isfile = os.path.isfile
 pjoin = os.path.join
-
-#-----------------------------------------------------------------------------
-# Function definitions
-#-----------------------------------------------------------------------------
-
-def cleanup():
-    """Clean up the junk left around by the build process"""
-    if "develop" not in sys.argv and "egg_info" not in sys.argv:
-        try:
-            shutil.rmtree('ipython.egg-info')
-        except:
-            try:
-                os.unlink('ipython.egg-info')
-            except:
-                pass
 
 #-------------------------------------------------------------------------------
 # Handle OS specific things
@@ -111,42 +88,6 @@ if os_name == 'windows' and 'sdist' in sys.argv:
     print('The sdist command is not available under Windows.  Exiting.')
     sys.exit(1)
 
-#-------------------------------------------------------------------------------
-# Make sure we aren't trying to run without submodules
-#-------------------------------------------------------------------------------
-here = os.path.abspath(os.path.dirname(__file__))
-
-def require_clean_submodules():
-    """Check on git submodules before distutils can do anything
-
-    Since distutils cannot be trusted to update the tree
-    after everything has been set in motion,
-    this is not a distutils command.
-    """
-    # PACKAGERS: Add a return here to skip checks for git submodules
-    
-    # don't do anything if nothing is actually supposed to happen
-    for do_nothing in ('-h', '--help', '--help-commands', 'clean', 'submodule'):
-        if do_nothing in sys.argv:
-            return
-
-    status = check_submodule_status(here)
-
-    if status == "missing":
-        print("checking out submodules for the first time")
-        update_submodules(here)
-    elif status == "unclean":
-        print('\n'.join([
-            "Cannot build / install IPython with unclean submodules",
-            "Please update submodules with",
-            "    python setup.py submodule",
-            "or",
-            "    git submodule update",
-            "or commit any submodule changes you have made."
-        ]))
-        sys.exit(1)
-
-require_clean_submodules()
 
 #-------------------------------------------------------------------------------
 # Things related to the IPython documentation
@@ -158,28 +99,9 @@ if len(sys.argv) >= 2 and sys.argv[1] in ('sdist','bdist_rpm'):
     # List of things to be updated. Each entry is a triplet of args for
     # target_update()
     to_update = [
-                  # FIXME - Disabled for now: we need to redo an automatic way
-                  # of generating the magic info inside the rst.
-                  #('docs/magic.tex',
-                  #['IPython/Magic.py'],
-                  #"cd doc && ./update_magic.sh" ),
-
-                 ('docs/man/ipcluster.1.gz',
-                  ['docs/man/ipcluster.1'],
-                  'cd docs/man && gzip -9c ipcluster.1 > ipcluster.1.gz'),
-
-                 ('docs/man/ipcontroller.1.gz',
-                  ['docs/man/ipcontroller.1'],
-                  'cd docs/man && gzip -9c ipcontroller.1 > ipcontroller.1.gz'),
-
-                 ('docs/man/ipengine.1.gz',
-                  ['docs/man/ipengine.1'],
-                  'cd docs/man && gzip -9c ipengine.1 > ipengine.1.gz'),
-
                  ('docs/man/ipython.1.gz',
                   ['docs/man/ipython.1'],
                   'cd docs/man && gzip -9c ipython.1 > ipython.1.gz'),
-
                  ]
 
 
@@ -191,6 +113,7 @@ if len(sys.argv) >= 2 and sys.argv[1] in ('sdist','bdist_rpm'):
 
 packages = find_packages()
 package_data = find_package_data()
+
 data_files = find_data_files()
 
 setup_args['packages'] = packages
@@ -224,17 +147,16 @@ class UploadWindowsInstallers(upload):
             self.upload_file('bdist_wininst', 'any', dist_file)
 
 setup_args['cmdclass'] = {
-    'build_py': git_prebuild('IPython'),
+    'build_py': \
+            check_package_data_first(git_prebuild('IPython')),
     'sdist' : git_prebuild('IPython', sdist),
     'upload_wininst' : UploadWindowsInstallers,
-    'submodule' : UpdateSubmodules,
-    'css' : CompileCSS,
     'symlink': install_symlinked,
     'install_lib_symlink': install_lib_symlink,
     'install_scripts_sym': install_scripts_for_symlink,
     'unsymlink': unsymlink,
-    'jsversion' : JavascriptVersion,
 }
+
 
 #---------------------------------------------------------------------------
 # Handle scripts, dependencies, and setuptools specific things
@@ -246,12 +168,6 @@ needs_setuptools = set(('develop', 'release', 'bdist_egg', 'bdist_rpm',
            'bdist', 'bdist_dumb', 'bdist_wininst', 'bdist_wheel',
            'egg_info', 'easy_install', 'upload', 'install_egg_info',
             ))
-if sys.platform == 'win32':
-    # Depend on setuptools for install on *Windows only*
-    # If we get script-installation working without setuptools,
-    # then we can back off, but until then use it.
-    # See Issue #369 on GitHub for more
-    needs_setuptools.add('install')
 
 if len(needs_setuptools.intersection(sys.argv)) > 0:
     import setuptools
@@ -263,33 +179,75 @@ setuptools_extra_args = {}
 # setuptools requirements
 
 extras_require = dict(
-    parallel = ['pyzmq>=2.1.11'],
-    qtconsole = ['pyzmq>=2.1.11', 'pygments'],
-    zmq = ['pyzmq>=2.1.11'],
-    doc = ['Sphinx>=1.1', 'numpydoc'],
-    test = ['nose>=0.10.1'],
-    notebook = ['tornado>=3.1', 'pyzmq>=2.1.11', 'jinja2'],
-    nbconvert = ['pygments', 'jinja2', 'Sphinx>=0.3']
+    parallel = ['ipyparallel'],
+    qtconsole = ['qtconsole'],
+    doc = ['Sphinx>=1.3'],
+    test = ['nose>=0.10.1', 'requests', 'testpath', 'pygments', 'nbformat', 'ipykernel', 'numpy'],
+    terminal = [],
+    kernel = ['ipykernel'],
+    nbformat = ['nbformat'],
+    notebook = ['notebook', 'ipywidgets'],
+    nbconvert = ['nbconvert'],
 )
+
+install_requires = [
+    'setuptools>=18.5',
+    'decorator',
+    'pickleshare',
+    'simplegeneric>0.8',
+    'traitlets>=4.2',
+    'prompt_toolkit>=1.0.3,<2.0.0',
+    'pygments',
+]
+
+# Platform-specific dependencies:
+# This is the correct way to specify these,
+# but requires pip >= 6. pip < 6 ignores these.
+
+extras_require.update({
+    ':python_version == "2.7"': ['backports.shutil_get_terminal_size'],
+    ':python_version == "2.7" or python_version == "3.3"': ['pathlib2'],
+    ':sys_platform != "win32"': ['pexpect'],
+    ':sys_platform == "darwin"': ['appnope'],
+    ':sys_platform == "win32"': ['colorama', 'win_unicode_console>=0.5'],
+    'test:python_version == "2.7"': ['mock'],
+})
+# FIXME: re-specify above platform dependencies for pip < 6
+# These would result in non-portable bdists.
+if not any(arg.startswith('bdist') for arg in sys.argv):
+    if sys.version_info < (3, 3):
+        extras_require['test'].append('mock')
+
+    if sys.platform == 'darwin':
+        install_requires.extend(['appnope'])
+
+    if not sys.platform.startswith('win'):
+        install_requires.append('pexpect')
+
+    # workaround pypa/setuptools#147, where setuptools misspells
+    # platform_python_implementation as python_implementation
+    if 'setuptools' in sys.modules:
+        for key in list(extras_require):
+            if 'platform_python_implementation' in key:
+                new_key = key.replace('platform_python_implementation', 'python_implementation')
+                extras_require[new_key] = extras_require.pop(key)
+
 everything = set()
-for deps in extras_require.values():
-    everything.update(deps)
+for key, deps in extras_require.items():
+    if ':' not in key:
+        everything.update(deps)
 extras_require['all'] = everything
-install_requires = []
-if sys.platform == 'darwin':
-    install_requires.append('readline')
-elif sys.platform.startswith('win'):
-    # Pyreadline has unicode and Python 3 fixes in 2.0
-    install_requires.append('pyreadline>=2.0')
 
 if 'setuptools' in sys.modules:
-    # setup.py develop should check for submodules
-    from setuptools.command.develop import develop
-    setup_args['cmdclass']['develop'] = require_submodules(develop)
-    setup_args['cmdclass']['bdist_wheel'] = get_bdist_wheel()
-    
     setuptools_extra_args['zip_safe'] = False
-    setuptools_extra_args['entry_points'] = {'console_scripts':find_entry_points()}
+    setuptools_extra_args['entry_points'] = {
+        'console_scripts': find_entry_points(),
+        'pygments.lexers': [
+            'ipythonconsole = IPython.lib.lexers:IPythonConsoleLexer',
+            'ipython = IPython.lib.lexers:IPythonLexer',
+            'ipython3 = IPython.lib.lexers:IPython3Lexer',
+        ],
+    }
     setup_args['extras_require'] = extras_require
     requires = setup_args['install_requires'] = install_requires
 
@@ -300,7 +258,7 @@ if 'setuptools' in sys.modules:
     if 'bdist_wininst' in sys.argv:
         if len(sys.argv) > 2 and \
                ('sdist' in sys.argv or 'bdist_rpm' in sys.argv):
-            print >> sys.stderr, "ERROR: bdist_wininst must be run alone. Exiting."
+            print("ERROR: bdist_wininst must be run alone. Exiting.", file=sys.stderr)
             sys.exit(1)
         setup_args['data_files'].append(
             ['Scripts', ('scripts/ipython.ico', 'scripts/ipython_nb.ico')])
@@ -310,13 +268,6 @@ if 'setuptools' in sys.modules:
                                   "ipython_win_post_install.py"}}
 
 else:
-    # If we are installing without setuptools, call this function which will
-    # check for dependencies an inform the user what is needed.  This is
-    # just to make life easy for users.
-    for install_cmd in ('install', 'symlink'):
-        if install_cmd in sys.argv:
-            check_for_dependencies()
-            break
     # scripts has to be a non-empty list, or install_scripts isn't called
     setup_args['scripts'] = [e.split('=')[0].strip() for e in find_entry_points()]
 
@@ -328,9 +279,10 @@ else:
 
 setup_args.update(setuptools_extra_args)
 
+
+
 def main():
     setup(**setup_args)
-    cleanup()
 
 if __name__ == '__main__':
     main()

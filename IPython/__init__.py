@@ -22,14 +22,17 @@ from __future__ import absolute_import
 
 import os
 import sys
+import warnings
 
 #-----------------------------------------------------------------------------
 # Setup everything
 #-----------------------------------------------------------------------------
 
 # Don't forget to also update setup.py when this changes!
-if sys.version_info[:2] < (2,7):
-    raise ImportError('IPython requires Python Version 2.7 or above.')
+v = sys.version_info
+if v[:2] < (2,7) or (v[0] >= 3 and v[:2] < (3,3)):
+    raise ImportError('IPython requires Python version 2.7 or 3.3 or above.')
+del v
 
 # Make it easy to import extensions - they are always directly on pythonpath.
 # Therefore, non-IPython modules can be added to extensions directory.
@@ -40,13 +43,11 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "extensions"))
 # Setup the top level names
 #-----------------------------------------------------------------------------
 
-from .config.loader import Config
 from .core.getipython import get_ipython
 from .core import release
 from .core.application import Application
 from .terminal.embed import embed
 
-from .core.error import TryNext
 from .core.interactiveshell import InteractiveShell
 from .testing import test
 from .utils.sysinfo import sys_info
@@ -86,7 +87,7 @@ def embed_kernel(module=None, local_ns=None, **kwargs):
         local_ns = caller_locals
     
     # Only import .zmq when we really need it
-    from IPython.kernel.zmq.embed import embed_kernel as real_embed_kernel
+    from ipykernel.embed import embed_kernel as real_embed_kernel
     real_embed_kernel(module=module, local_ns=local_ns, **kwargs)
 
 def start_ipython(argv=None, **kwargs):

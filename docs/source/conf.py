@@ -22,9 +22,23 @@ ON_RTD = os.environ.get('READTHEDOCS', None) == 'True'
 if ON_RTD:
     # Mock the presence of matplotlib, which we don't have on RTD
     # see
-    # http://read-the-docs.readthedocs.org/en/latest/faq.html
+    # http://read-the-docs.readthedocs.io/en/latest/faq.html
     tags.add('rtd')
-    
+
+    # RTD doesn't use the Makefile, so re-run autogen_{things}.py here.
+    for name in ('config', 'api', 'magics', 'shortcuts'):
+        fname = 'autogen_{}.py'.format(name)
+        fpath = os.path.abspath(os.path.join('..', fname))
+        with open(fpath) as f:
+            exec(compile(f.read(), fname, 'exec'), {
+                '__file__': fpath,
+                '__name__': '__main__',
+            })
+else:
+    import sphinx_rtd_theme
+    html_theme = "sphinx_rtd_theme"
+    html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
+
 # If your extensions are in another directory, add it here. If the directory
 # is relative to the documentation root, use os.path.abspath to make it
 # absolute, like shown here.
@@ -32,7 +46,7 @@ sys.path.insert(0, os.path.abspath('../sphinxext'))
 
 # We load the ipython release info into a dict by explicit execution
 iprelease = {}
-execfile('../../IPython/core/release.py',iprelease)
+exec(compile(open('../../IPython/core/release.py').read(), '../../IPython/core/release.py', 'exec'),iprelease)
 
 # General configuration
 # ---------------------
@@ -50,8 +64,9 @@ extensions = [
     'sphinx.ext.intersphinx',
     'IPython.sphinxext.ipython_console_highlighting',
     'IPython.sphinxext.ipython_directive',
-    'numpydoc',  # to preprocess docstrings
+    'sphinx.ext.napoleon',  # to preprocess docstrings
     'github',  # for easy GitHub links
+    'magics',
 ]
 
 if ON_RTD:
@@ -68,12 +83,21 @@ templates_path = ['_templates']
 # The suffix of source filenames.
 source_suffix = '.rst'
 
-if iprelease['_version_extra']:
+def is_stable(extra):
+    for ext in {'dev', 'b', 'rc'}:
+        if ext in extra:
+            return False
+    return True
+
+if is_stable(iprelease['_version_extra']):
+    tags.add('ipystable')
+else:
+    tags.add('ipydev')
     rst_prolog = """
-    .. note::
+    .. warning::
 
         This documentation is for a development version of IPython. There may be
-        significant differences from the latest stable release (1.1.0).
+        significant differences from the latest stable release.
 
     """
 
@@ -82,7 +106,7 @@ master_doc = 'index'
 
 # General substitutions.
 project = 'IPython'
-copyright = '2008, The IPython Development Team'
+copyright = 'The IPython Development Team'
 
 # ghissue config
 github_project_url = "https://github.com/ipython/ipython"
@@ -95,8 +119,7 @@ numpydoc_class_members_toctree = False
 # other places throughout the built documents.
 #
 # The full version, including alpha/beta/rc tags.
-codename = iprelease['codename']
-release = "%s: %s" % (iprelease['version'], codename)
+release = "%s" % iprelease['version']
 # Just the X.Y.Z part, no '-dev'
 version = iprelease['version'].split('-', 1)[0]
 
@@ -110,9 +133,10 @@ today_fmt = '%B %d, %Y'
 # List of documents that shouldn't be included in the build.
 #unused_docs = []
 
-# List of directories, relative to source directories, that shouldn't be searched
-# for source files.
-exclude_dirs = ['attic']
+# Exclude these glob-style patterns when looking for source files. They are
+# relative to the source/ directory.
+exclude_patterns = ['whatsnew/pr']
+
 
 # If true, '()' will be appended to :func: etc. cross-reference text.
 #add_function_parentheses = True
@@ -128,6 +152,8 @@ exclude_dirs = ['attic']
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = 'sphinx'
 
+# Set the default role so we can use `foo` instead of ``foo``
+default_role = 'literal'
 
 # Options for HTML output
 # -----------------------
@@ -135,7 +161,8 @@ pygments_style = 'sphinx'
 # The style sheet to use for HTML and HTML Help pages. A file of that name
 # must exist either in Sphinx' static/ path, or in one of the custom paths
 # given in html_static_path.
-html_style = 'default.css'
+# html_style = 'default.css'
+
 
 # The name for this set of Sphinx documents.  If None, it defaults to
 # "<project> v<release> documentation".
@@ -150,6 +177,8 @@ html_style = 'default.css'
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ['_static']
 
+# Favicon needs the directory name
+html_favicon = '_static/favicon.ico'
 # If not '', a 'Last updated on:' timestamp is inserted at every page bottom,
 # using the given strftime format.
 html_last_updated_fmt = '%b %d, %Y'
@@ -164,7 +193,10 @@ html_last_updated_fmt = '%b %d, %Y'
 # Additional templates that should be rendered to pages, maps page names to
 # template names.
 html_additional_pages = {
-                         'interactive/htmlnotebook': 'htmlnotebook.html',
+    'interactive/htmlnotebook': 'notebook_redirect.html',
+    'interactive/notebook': 'notebook_redirect.html',
+    'interactive/nbconvert': 'notebook_redirect.html',
+    'interactive/public_server': 'notebook_redirect.html',
 }
 
 # If false, no module index is generated.
@@ -184,7 +216,13 @@ html_additional_pages = {
 # Output file base name for HTML help builder.
 htmlhelp_basename = 'ipythondoc'
 
-intersphinx_mapping = {'python': ('http://docs.python.org/2/', None)}
+intersphinx_mapping = {'python': ('https://docs.python.org/3/', None),
+                       'rpy2': ('https://rpy2.readthedocs.io/en/version_2.8.x/', None),
+                       'traitlets': ('https://traitlets.readthedocs.io/en/latest/', None),
+                       'jupyterclient': ('https://jupyter-client.readthedocs.io/en/latest/', None),
+                       'ipyparallel': ('https://ipyparallel.readthedocs.io/en/latest/', None),
+                       'jupyter': ('https://jupyter.readthedocs.io/en/latest/', None),
+                      }
 
 # Options for LaTeX output
 # ------------------------
@@ -200,10 +238,10 @@ latex_font_size = '11pt'
 
 latex_documents = [
     ('index', 'ipython.tex', 'IPython Documentation',
-     ur"""The IPython Development Team""", 'manual', True),
+     u"""The IPython Development Team""", 'manual', True),
     ('parallel/winhpc_index', 'winhpc_whitepaper.tex',
      'Using IPython on Windows HPC Server 2008',
-     ur"Brian E. Granger", 'manual', True)
+     u"Brian E. Granger", 'manual', True)
 ]
 
 # The name of an image file (relative to this directory) to place at the top of

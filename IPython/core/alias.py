@@ -24,12 +24,12 @@ import os
 import re
 import sys
 
-from IPython.config.configurable import Configurable
+from traitlets.config.configurable import Configurable
 from IPython.core.error import UsageError
 
 from IPython.utils.py3compat import string_types
-from IPython.utils.traitlets import List, Instance
-from IPython.utils.warn import error
+from traitlets import List, Instance
+from logging import error
 
 #-----------------------------------------------------------------------------
 # Utilities
@@ -50,7 +50,7 @@ def default_aliases():
 
     if os.name == 'posix':
         default_aliases = [('mkdir', 'mkdir'), ('rmdir', 'rmdir'),
-                           ('mv', 'mv -i'), ('rm', 'rm -i'), ('cp', 'cp -i'),
+                           ('mv', 'mv'), ('rm', 'rm'), ('cp', 'cp'),
                            ('cat', 'cat'),
                            ]
         # Useful set of ls aliases.  The GNU and BSD options are a little
@@ -68,6 +68,21 @@ def default_aliases():
                           ('ldir', 'ls -F -o --color %l | grep /$'),
                           # things which are executable
                           ('lx', 'ls -F -o --color %l | grep ^-..x'),
+                          ]
+        elif sys.platform.startswith('openbsd') or sys.platform.startswith('netbsd'):
+            # OpenBSD, NetBSD. The ls implementation on these platforms do not support
+            # the -G switch and lack the ability to use colorized output.
+            ls_aliases = [('ls', 'ls -F'),
+                          # long ls
+                          ('ll', 'ls -F -l'),
+                          # ls normal files only
+                          ('lf', 'ls -F -l %l | grep ^-'),
+                          # ls symbolic links
+                          ('lk', 'ls -F -l %l | grep ^l'),
+                          # directories or links to directories,
+                          ('ldir', 'ls -F -l %l | grep /$'),
+                          # things which are executable
+                          ('lx', 'ls -F -l %l | grep ^-..x'),
                           ]
         else:
             # BSD, OSX, etc.
@@ -116,6 +131,7 @@ class Alias(object):
         self.shell = shell
         self.name = name
         self.cmd = cmd
+        self.__doc__ = "Alias for `!{}`".format(cmd)
         self.nargs = self.validate()
 
     def validate(self):
@@ -136,8 +152,8 @@ class Alias(object):
             raise InvalidAliasError("An alias command must be a string, "
                                     "got: %r" % self.cmd)
 
-        nargs = self.cmd.count('%s')
-
+        nargs = self.cmd.count('%s') - self.cmd.count('%%s')
+  
         if (nargs > 0) and (self.cmd.find('%l') >= 0):
             raise InvalidAliasError('The %s and %l specifiers are mutually '
                                     'exclusive in alias definitions.')
@@ -154,7 +170,10 @@ class Alias(object):
         if cmd.find('%l') >= 0:
             cmd = cmd.replace('%l', rest)
             rest = ''
+        
         if nargs==0:
+            if cmd.find('%%s') >= 1:
+                cmd = cmd.replace('%%s', '%s')
             # Simple, argument-less aliases
             cmd = '%s %s' % (cmd, rest)
         else:
@@ -173,9 +192,9 @@ class Alias(object):
 
 class AliasManager(Configurable):
 
-    default_aliases = List(default_aliases(), config=True)
-    user_aliases = List(default_value=[], config=True)
-    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
+    default_aliases = List(default_aliases()).tag(config=True)
+    user_aliases = List(default_value=[]).tag(config=True)
+    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC', allow_none=True)
 
     def __init__(self, shell=None, **kwargs):
         super(AliasManager, self).__init__(shell=shell, **kwargs)

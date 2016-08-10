@@ -14,8 +14,11 @@ Getting extensions
 
 A few important extensions are :ref:`bundled with IPython <bundled_extensions>`.
 Others can be found on the `extensions index
-<https://github.com/ipython/ipython/wiki/Extensions-Index>`_ on the wiki, and installed with
-the ``%install_ext`` magic function.
+<https://github.com/ipython/ipython/wiki/Extensions-Index>`_ on the wiki, and
+the `Framework :: IPython tag <https://pypi.python.org/pypi?:action=browse&c=586>`_
+on PyPI.
+
+Extensions on PyPI can be installed using ``pip``, like any other Python package.
 
 Using extensions
 ================
@@ -53,9 +56,11 @@ imported, and the currently active :class:`~IPython.core.interactiveshell.Intera
 instance is passed as the only argument. You can do anything you want with
 IPython at that point.
 
-:func:`load_ipython_extension` will be called again if you load or reload
-the extension again. It is up to the extension author to add code to manage
-that.
+:func:`load_ipython_extension` will not be called again if the user use
+`%load_extension`.  The user have to explicitly ask the extension to be
+reloaded (with `%reload_extension`). In case where the use ask the extension to
+be reloaded, , the extension will be unloaded (with
+`unload_ipython_extension`), and loaded again. 
 
 Useful :class:`InteractiveShell` methods include :meth:`~IPython.core.interactiveshell.InteractiveShell.register_magic_function`, 
 :meth:`~IPython.core.interactiveshell.InteractiveShell.push` (to add variables to the user namespace) and 
@@ -72,7 +77,9 @@ within the :ref:`IPython directory <ipythondir>`. This directory is
 added to :data:`sys.path` automatically.
 
 When your extension is ready for general use, please add it to the `extensions
-index <https://github.com/ipython/ipython/wiki/Extensions-Index>`_.
+index <https://github.com/ipython/ipython/wiki/Extensions-Index>`_. We also
+encourage you to upload it to PyPI and use the ``Framework :: IPython``
+classifier, so that users can install it with standard packaging tools.
 
 .. _bundled_extensions:
 
@@ -83,8 +90,14 @@ Extensions bundled with IPython
    :maxdepth: 1
 
    autoreload
-   cythonmagic
-   octavemagic
-   rmagic
    storemagic
-   sympyprinting
+
+* ``octavemagic`` used to be bundled, but is now part of `oct2py <http://blink1073.github.io/oct2py/docs/>`_.
+  Use ``%load_ext oct2py.ipython`` to load it.
+* ``rmagic`` is now part of `rpy2 <http://rpy.sourceforge.net/>`_. Use
+  ``%load_ext rpy2.ipython`` to load it, and see :mod:`rpy2.ipython.rmagic` for
+  details of how to use it.
+* ``cythonmagic`` used to be bundled, but is now part of `cython <https://github.com/cython/cython/>`_
+  Use ``%load_ext Cython`` to load it.
+* ``sympyprinting`` used to be a bundled extension, but you should now use
+  :func:`sympy.init_printing` instead.

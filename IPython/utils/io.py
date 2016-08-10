@@ -3,33 +3,30 @@
 IO related utilities.
 """
 
-#-----------------------------------------------------------------------------
-#  Copyright (C) 2008-2011  The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
+
 from __future__ import print_function
 from __future__ import absolute_import
 
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
-import codecs
+
+import atexit
 import os
 import sys
 import tempfile
+import warnings
+from warnings import warn
+
+from IPython.utils.decorators import undoc
 from .capture import CapturedIO, capture_output
 from .py3compat import string_types, input, PY3
 
-#-----------------------------------------------------------------------------
-# Code
-#-----------------------------------------------------------------------------
-
-
+@undoc
 class IOStream:
 
-    def __init__(self,stream, fallback=None):
+    def __init__(self, stream, fallback=None):
+        warn('IOStream is deprecated since IPython 5.0, use sys.{stdin,stdout,stderr} instead',
+             DeprecationWarning, stacklevel=2)
         if not hasattr(stream,'write') or not hasattr(stream,'flush'):
             if fallback is not None:
                 stream = fallback
@@ -50,6 +47,8 @@ class IOStream:
         return tpl.format(mod=cls.__module__, cls=cls.__name__, args=self.stream)
 
     def write(self,data):
+        warn('IOStream is deprecated since IPython 5.0, use sys.{stdin,stdout,stderr} instead',
+             DeprecationWarning, stacklevel=2)
         try:
             self._swrite(data)
         except:
@@ -64,6 +63,8 @@ class IOStream:
                       file=sys.stderr)
 
     def writelines(self, lines):
+        warn('IOStream is deprecated since IPython 5.0, use sys.{stdin,stdout,stderr} instead',
+             DeprecationWarning, stacklevel=2)
         if isinstance(lines, string_types):
             lines = [lines]
         for line in lines:
@@ -81,27 +82,16 @@ class IOStream:
         pass
 
 # setup stdin/stdout/stderr to sys.stdin/sys.stdout/sys.stderr
-devnull = open(os.devnull, 'a')
-stdin = IOStream(sys.stdin, fallback=devnull)
-stdout = IOStream(sys.stdout, fallback=devnull)
-stderr = IOStream(sys.stderr, fallback=devnull)
+devnull = open(os.devnull, 'w')
+atexit.register(devnull.close)
 
-class IOTerm:
-    """ Term holds the file or file-like objects for handling I/O operations.
-
-    These are normally just sys.stdin, sys.stdout and sys.stderr but for
-    Windows they can can replaced to allow editing the strings before they are
-    displayed."""
-
-    # In the future, having IPython channel all its I/O operations through
-    # this class will make it easier to embed it into other environments which
-    # are not a normal terminal (such as a GUI-based shell)
-    def __init__(self, stdin=None, stdout=None, stderr=None):
-        mymodule = sys.modules[__name__]
-        self.stdin  = IOStream(stdin, mymodule.stdin)
-        self.stdout = IOStream(stdout, mymodule.stdout)
-        self.stderr = IOStream(stderr, mymodule.stderr)
-
+# io.std* are deprecated, but don't show our own deprecation warnings
+# during initialization of the deprecated API.
+with warnings.catch_warnings():
+    warnings.simplefilter('ignore', DeprecationWarning)
+    stdin = IOStream(sys.stdin, fallback=devnull)
+    stdout = IOStream(sys.stdout, fallback=devnull)
+    stderr = IOStream(sys.stderr, fallback=devnull)
 
 class Tee(object):
     """A class to duplicate an output stream to stdout/err.
@@ -217,6 +207,11 @@ def temp_pyfile(src, ext='.py'):
     f.flush()
     return fname, f
 
+def atomic_writing(*args, **kwargs):
+    """DEPRECATED: moved to notebook.services.contents.fileio"""
+    warn("IPython.utils.io.atomic_writing has moved to notebook.services.contents.fileio")
+    from notebook.services.contents.fileio import atomic_writing
+    return atomic_writing(*args, **kwargs)
 
 def raw_print(*args, **kw):
     """Raw print to sys.__stdout__, otherwise identical interface to print()."""
@@ -238,25 +233,9 @@ def raw_print_err(*args, **kw):
 rprint = raw_print
 rprinte = raw_print_err
 
+
 def unicode_std_stream(stream='stdout'):
-    u"""Get a wrapper to write unicode to stdout/stderr as UTF-8.
-
-    This ignores environment variables and default encodings, to reliably write
-    unicode to stdout or stderr.
-
-    ::
-
-        unicode_std_stream().write(u'ł@e¶ŧ←')
-    """
-    assert stream in ('stdout', 'stderr')
-    stream  = getattr(sys, stream)
-    if PY3:
-        try:
-            stream_b = stream.buffer
-        except AttributeError:
-            # sys.stdout has been replaced - use it directly
-            return stream
-    else:
-        stream_b = stream
-
-    return codecs.getwriter('utf-8')(stream_b)
+    """DEPRECATED, moved to nbconvert.utils.io"""
+    warn("IPython.utils.io.unicode_std_stream has moved to nbconvert.utils.io")
+    from nbconvert.utils.io import unicode_std_stream
+    return unicode_std_stream(stream)

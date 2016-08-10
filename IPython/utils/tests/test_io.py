@@ -1,20 +1,15 @@
 # encoding: utf-8
 """Tests for io.py"""
 
-#-----------------------------------------------------------------------------
-#  Copyright (C) 2008-2011  The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
 from __future__ import print_function
 from __future__ import absolute_import
 
 import io as stdlib_io
+import os.path
+import stat
 import sys
 
 from subprocess import Popen, PIPE
@@ -22,18 +17,15 @@ import unittest
 
 import nose.tools as nt
 
-from IPython.testing.decorators import skipif
-from IPython.utils.io import Tee, capture_output, unicode_std_stream
+from IPython.testing.decorators import skipif, skip_win32
+from IPython.utils.io import Tee, capture_output
 from IPython.utils.py3compat import doctest_refactor_print, PY3
+from IPython.utils.tempdir import TemporaryDirectory
 
 if PY3:
     from io import StringIO
 else:
     from StringIO import StringIO
-
-#-----------------------------------------------------------------------------
-# Tests
-#-----------------------------------------------------------------------------
 
 
 def test_tee_simple():
@@ -92,33 +84,4 @@ def test_capture_output():
     nt.assert_equal(io.stdout, 'hi, stdout\n')
     nt.assert_equal(io.stderr, 'hi, stderr\n')
 
-def test_UnicodeStdStream():
-    # Test wrapping a bytes-level stdout
-    if PY3:
-        stdoutb = stdlib_io.BytesIO()
-        stdout = stdlib_io.TextIOWrapper(stdoutb, encoding='ascii')
-    else:
-        stdout = stdoutb = stdlib_io.BytesIO()
 
-    orig_stdout = sys.stdout
-    sys.stdout = stdout
-    try:
-        sample = u"@łe¶ŧ←"
-        unicode_std_stream().write(sample)
-
-        output = stdoutb.getvalue().decode('utf-8')
-        nt.assert_equal(output, sample)
-        assert not stdout.closed
-    finally:
-        sys.stdout = orig_stdout
-
-@skipif(not PY3, "Not applicable on Python 2")
-def test_UnicodeStdStream_nowrap():
-    # If we replace stdout with a StringIO, it shouldn't get wrapped.
-    orig_stdout = sys.stdout
-    sys.stdout = StringIO()
-    try:
-        nt.assert_is(unicode_std_stream(), sys.stdout)
-        assert not sys.stdout.closed
-    finally:
-        sys.stdout = orig_stdout

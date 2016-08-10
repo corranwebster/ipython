@@ -1,44 +1,34 @@
 # -*- coding: utf-8 -*-
-"""Tools for handling LaTeX.
+"""Tools for handling LaTeX."""
 
-Authors:
-
-* Brian Granger
-"""
-#-----------------------------------------------------------------------------
-# Copyright (C) 2010 IPython Development Team.
-#
+# Copyright (c) IPython Development Team.
 # Distributed under the terms of the Modified BSD License.
-#
-# The full license is in the file COPYING.txt, distributed with this software.
-#-----------------------------------------------------------------------------
 
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
-
-from io import BytesIO
-from base64 import encodestring
+from io import BytesIO, open
 import os
 import tempfile
 import shutil
 import subprocess
 
 from IPython.utils.process import find_cmd, FindCmdError
-from IPython.config.configurable import SingletonConfigurable
-from IPython.utils.traitlets import List, CBool, CUnicode
-from IPython.utils.py3compat import bytes_to_str
+from traitlets.config import get_config
+from traitlets.config.configurable import SingletonConfigurable
+from traitlets import List, Bool, Unicode
+from IPython.utils.py3compat import cast_unicode, cast_unicode_py2 as u, PY3
 
-#-----------------------------------------------------------------------------
-# Tools
-#-----------------------------------------------------------------------------
+try: # Py3
+    from base64 import encodebytes
+except ImportError: # Py2
+    from base64 import encodestring as encodebytes
 
 
 class LaTeXTool(SingletonConfigurable):
     """An object to store configuration of the LaTeX tool."""
-
+    def _config_default(self):
+        return get_config()
+    
     backends = List(
-        CUnicode, ["matplotlib", "dvipng"],
+        Unicode(), ["matplotlib", "dvipng"],
         help="Preferred backend to draw LaTeX math equations. "
         "Backends in the list are checked one by one and the first "
         "usable one is used.  Note that `matplotlib` backend "
@@ -49,24 +39,24 @@ class LaTeXTool(SingletonConfigurable):
         # for display style, the default ["matplotlib", "dvipng"] can
         # be used.  To NOT use dvipng so that other repr such as
         # unicode pretty printing is used, you can use ["matplotlib"].
-        config=True)
+        ).tag(config=True)
 
-    use_breqn = CBool(
+    use_breqn = Bool(
         True,
         help="Use breqn.sty to automatically break long equations. "
         "This configuration takes effect only for dvipng backend.",
-        config=True)
+        ).tag(config=True)
 
     packages = List(
         ['amsmath', 'amsthm', 'amssymb', 'bm'],
         help="A list of packages to use for dvipng backend. "
         "'breqn' will be automatically appended when use_breqn=True.",
-        config=True)
+        ).tag(config=True)
 
-    preamble = CUnicode(
+    preamble = Unicode(
         help="Additional preamble to use when generating LaTeX source "
         "for dvipng backend.",
-        config=True)
+        ).tag(config=True)
 
 
 def latex_to_png(s, encode=False, backend=None, wrap=False):
@@ -77,7 +67,7 @@ def latex_to_png(s, encode=False, backend=None, wrap=False):
     s : str
         The raw string containing valid inline LaTeX.
     encode : bool, optional
-        Should the PNG data bebase64 encoded to make it JSON'able.
+        Should the PNG data base64 encoded to make it JSON'able.
     backend : {matplotlib, dvipng}
         Backend for producing PNG data.
     wrap : bool
@@ -86,6 +76,7 @@ def latex_to_png(s, encode=False, backend=None, wrap=False):
     None is returned when the backend cannot be used.
 
     """
+    s = cast_unicode(s)
     allowed_backends = LaTeXTool.instance().backends
     if backend is None:
         backend = allowed_backends[0]
@@ -99,22 +90,29 @@ def latex_to_png(s, encode=False, backend=None, wrap=False):
         raise ValueError('No such backend {0}'.format(backend))
     bin_data = f(s, wrap)
     if encode and bin_data:
-        bin_data = encodestring(bin_data)
+        bin_data = encodebytes(bin_data)
     return bin_data
 
 
 def latex_to_png_mpl(s, wrap):
     try:
         from matplotlib import mathtext
+        from pyparsing import ParseFatalException
     except ImportError:
         return None
 
+    # mpl mathtext doesn't support display math, force inline
+    s = s.replace('$$', '$')
     if wrap:
-        s = '${0}$'.format(s)
-    mt = mathtext.MathTextParser('bitmap')
-    f = BytesIO()
-    mt.to_png(f, s, fontsize=12)
-    return f.getvalue()
+        s = u'${0}$'.format(s)
+
+    try:
+        mt = mathtext.MathTextParser('bitmap')
+        f = BytesIO()
+        mt.to_png(f, s, fontsize=12)
+        return f.getvalue()
+    except (ValueError, RuntimeError, ParseFatalException):
+        return None
 
 
 def latex_to_png_dvipng(s, wrap):
@@ -129,13 +127,13 @@ def latex_to_png_dvipng(s, wrap):
         dvifile = os.path.join(workdir, "tmp.dvi")
         outfile = os.path.join(workdir, "tmp.png")
 
-        with open(tmpfile, "w") as f:
+        with open(tmpfile, "w", encoding='utf8') as f:
             f.writelines(genelatex(s, wrap))
 
-        with open(os.devnull, 'w') as devnull:
+        with open(os.devnull, 'wb') as devnull:
             subprocess.check_call(
-                ["latex", "-halt-on-error", tmpfile], cwd=workdir,
-                stdout=devnull, stderr=devnull)
+                ["latex", "-halt-on-error", "-interaction", "batchmode", tmpfile],
+                cwd=workdir, stdout=devnull, stderr=devnull)
 
             subprocess.check_call(
                 ["dvipng", "-T", "tight", "-x", "1500", "-z", "9",
@@ -144,6 +142,8 @@ def latex_to_png_dvipng(s, wrap):
 
         with open(outfile, "rb") as f:
             return f.read()
+    except subprocess.CalledProcessError:
+        return None
     finally:
         shutil.rmtree(workdir)
 
@@ -156,7 +156,7 @@ def kpsewhich(filename):
             ["kpsewhich", filename],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         (stdout, stderr) = proc.communicate()
-        return stdout.strip()
+        return stdout.strip().decode('utf8', 'replace')
     except FindCmdError:
         pass
 
@@ -165,28 +165,28 @@ def genelatex(body, wrap):
     """Generate LaTeX document for dvipng backend."""
     lt = LaTeXTool.instance()
     breqn = wrap and lt.use_breqn and kpsewhich("breqn.sty")
-    yield r'\documentclass{article}'
+    yield u(r'\documentclass{article}')
     packages = lt.packages
     if breqn:
         packages = packages + ['breqn']
     for pack in packages:
-        yield r'\usepackage{{{0}}}'.format(pack)
-    yield r'\pagestyle{empty}'
+        yield u(r'\usepackage{{{0}}}'.format(pack))
+    yield u(r'\pagestyle{empty}')
     if lt.preamble:
         yield lt.preamble
-    yield r'\begin{document}'
+    yield u(r'\begin{document}')
     if breqn:
-        yield r'\begin{dmath*}'
+        yield u(r'\begin{dmath*}')
         yield body
-        yield r'\end{dmath*}'
+        yield u(r'\end{dmath*}')
     elif wrap:
-        yield '$${0}$$'.format(body)
+        yield u'$${0}$$'.format(body)
     else:
         yield body
-    yield r'\end{document}'
+    yield u'\end{document}'
 
 
-_data_uri_template_png = """<img src="data:image/png;base64,%s" alt=%s />"""
+_data_uri_template_png = u"""<img src="data:image/png;base64,%s" alt=%s />"""
 
 def latex_to_html(s, alt='image'):
     """Render LaTeX to HTML with embedded PNG data using data URIs.
@@ -198,54 +198,8 @@ def latex_to_html(s, alt='image'):
     alt : str
         The alt text to use for the HTML.
     """
-    base64_data = bytes_to_str(latex_to_png(s, encode=True), 'ascii')
+    base64_data = latex_to_png(s, encode=True).decode('ascii')
     if base64_data:
         return _data_uri_template_png  % (base64_data, alt)
 
-
-# From matplotlib, thanks to mdboom. Once this is in matplotlib releases, we
-# will remove.
-def math_to_image(s, filename_or_obj, prop=None, dpi=None, format=None):
-    """
-    Given a math expression, renders it in a closely-clipped bounding
-    box to an image file.
-
-    *s*
-       A math expression.  The math portion should be enclosed in
-       dollar signs.
-
-    *filename_or_obj*
-       A filepath or writable file-like object to write the image data
-       to.
-
-    *prop*
-       If provided, a FontProperties() object describing the size and
-       style of the text.
-
-    *dpi*
-       Override the output dpi, otherwise use the default associated
-       with the output format.
-
-    *format*
-       The output format, eg. 'svg', 'pdf', 'ps' or 'png'.  If not
-       provided, will be deduced from the filename.
-    """
-    from matplotlib import figure
-    # backend_agg supports all of the core output formats
-    from matplotlib.backends import backend_agg
-    from matplotlib.font_manager import FontProperties
-    from matplotlib.mathtext import MathTextParser
-
-    if prop is None:
-        prop = FontProperties()
-
-    parser = MathTextParser('path')
-    width, height, depth, _, _ = parser.parse(s, dpi=72, prop=prop)
-
-    fig = figure.Figure(figsize=(width / 72.0, height / 72.0))
-    fig.text(0, depth/height, s, fontproperties=prop)
-    backend_agg.FigureCanvasAgg(fig)
-    fig.savefig(filename_or_obj, dpi=dpi, format=format)
-
-    return depth
 

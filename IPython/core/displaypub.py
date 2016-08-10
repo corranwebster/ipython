@@ -10,29 +10,20 @@ There are two components of the display system:
 This module defines the logic display publishing. The display publisher uses
 the ``display_data`` message type that is defined in the IPython messaging
 spec.
-
-Authors:
-
-* Brian Granger
 """
 
-#-----------------------------------------------------------------------------
-#       Copyright (C) 2008-2011 The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
-
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 
 from __future__ import print_function
 
-from IPython.config.configurable import Configurable
-from IPython.utils import io
-from IPython.utils.py3compat import string_types
-from IPython.utils.traitlets import List
+import sys
+
+from traitlets.config.configurable import Configurable
+from traitlets import List
+
+# This used to be defined here - it is imported for backwards compatibility
+from .display import publish_display_data
 
 #-----------------------------------------------------------------------------
 # Main payload class
@@ -45,29 +36,24 @@ class DisplayPublisher(Configurable):
     be accessed there.
     """
 
-    def _validate_data(self, source, data, metadata=None):
+    def _validate_data(self, data, metadata=None):
         """Validate the display data.
 
         Parameters
         ----------
-        source : str
-            The fully dotted name of the callable that created the data, like
-            :func:`foo.bar.my_formatter`.
         data : dict
             The formata data dictionary.
         metadata : dict
             Any metadata for the data.
         """
 
-        if not isinstance(source, string_types):
-            raise TypeError('source must be a str, got: %r' % source)
         if not isinstance(data, dict):
             raise TypeError('data must be a dict, got: %r' % data)
         if metadata is not None:
             if not isinstance(metadata, dict):
                 raise TypeError('metadata must be a dict, got: %r' % data)
 
-    def publish(self, source, data, metadata=None):
+    def publish(self, data, metadata=None, source=None):
         """Publish data and metadata to all frontends.
 
         See the ``display_data`` message in the messaging documentation for
@@ -77,6 +63,7 @@ class DisplayPublisher(Configurable):
 
         * text/plain
         * text/html
+        * text/markdown
         * text/latex
         * application/json
         * application/javascript
@@ -86,9 +73,6 @@ class DisplayPublisher(Configurable):
 
         Parameters
         ----------
-        source : str
-            A string that give the function or method that created the data,
-            such as 'IPython.core.page'.
         data : dict
             A dictionary having keys that are valid MIME types (like
             'text/plain' or 'image/svg+xml') and values that are the data for
@@ -103,75 +87,31 @@ class DisplayPublisher(Configurable):
             the data.  Metadata specific to each mime-type can be specified
             in the metadata dict with the same mime-type keys as
             the data itself.
+        source : str, deprecated
+            Unused.
         """
 
-        # The default is to simply write the plain text data using io.stdout.
+        # The default is to simply write the plain text data using sys.stdout.
         if 'text/plain' in data:
-            print(data['text/plain'], file=io.stdout)
+            print(data['text/plain'])
 
     def clear_output(self, wait=False):
         """Clear the output of the cell receiving output."""
-        print('\033[2K\r', file=io.stdout, end='')
-        io.stdout.flush()
-        print('\033[2K\r', file=io.stderr, end='')
-        io.stderr.flush()
+        print('\033[2K\r', end='')
+        sys.stdout.flush()
+        print('\033[2K\r', end='')
+        sys.stderr.flush()
 
 
 class CapturingDisplayPublisher(DisplayPublisher):
     """A DisplayPublisher that stores"""
     outputs = List()
 
-    def publish(self, source, data, metadata=None):
-        self.outputs.append((source, data, metadata))
+    def publish(self, data, metadata=None, source=None):
+        self.outputs.append((data, metadata))
     
     def clear_output(self, wait=False):
         super(CapturingDisplayPublisher, self).clear_output(wait)
         
         # empty the list, *do not* reassign a new list
         del self.outputs[:]
-
-
-def publish_display_data(source, data, metadata=None):
-    """Publish data and metadata to all frontends.
-
-    See the ``display_data`` message in the messaging documentation for
-    more details about this message type.
-
-    The following MIME types are currently implemented:
-
-    * text/plain
-    * text/html
-    * text/latex
-    * application/json
-    * application/javascript
-    * image/png
-    * image/jpeg
-    * image/svg+xml
-
-    Parameters
-    ----------
-    source : str
-        A string that give the function or method that created the data,
-        such as 'IPython.core.page'.
-    data : dict
-        A dictionary having keys that are valid MIME types (like
-        'text/plain' or 'image/svg+xml') and values that are the data for
-        that MIME type. The data itself must be a JSON'able data
-        structure. Minimally all data should have the 'text/plain' data,
-        which can be displayed by all frontends. If more than the plain
-        text is given, it is up to the frontend to decide which
-        representation to use.
-    metadata : dict
-        A dictionary for metadata related to the data. This can contain
-        arbitrary key, value pairs that frontends can use to interpret
-        the data. mime-type keys matching those in data can be used
-        to specify metadata about particular representations.
-        """
-    from IPython.core.interactiveshell import InteractiveShell
-    InteractiveShell.instance().display_pub.publish(
-        source,
-        data,
-        metadata
-    )
-
-

@@ -6,34 +6,52 @@ test suite.
 
 """
 
-#-----------------------------------------------------------------------------
-#  Copyright (C) 2009-2011  The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
 from __future__ import print_function
 
 import argparse
+import json
 import multiprocessing.pool
-from multiprocessing import Process, Queue
 import os
+import stat
+import re
+import requests
 import shutil
 import signal
 import sys
 import subprocess
 import time
 
-from .iptest import have, test_group_names as py_test_group_names, test_sections
+from .iptest import (
+    have, test_group_names as py_test_group_names, test_sections, StreamCapturer,
+    test_for,
+)
 from IPython.utils.path import compress_user
 from IPython.utils.py3compat import bytes_to_str
 from IPython.utils.sysinfo import get_sys_info
 from IPython.utils.tempdir import TemporaryDirectory
+from IPython.utils.text import strip_ansi
 
+try:
+    # Python >= 3.3
+    from subprocess import TimeoutExpired
+    def popen_wait(p, timeout):
+        return p.wait(timeout)
+except ImportError:
+    class TimeoutExpired(Exception):
+        pass
+    def popen_wait(p, timeout):
+        """backport of Popen.wait from Python 3"""
+        for i in range(int(10 * timeout)):
+            if p.poll() is not None:
+                return
+            time.sleep(0.1)
+        if p.poll() is None:
+            raise TimeoutExpired
+
+NOTEBOOK_SHUTDOWN_TIMEOUT = 10
 
 class TestController(object):
     """Run tests in a subprocess
@@ -50,27 +68,51 @@ class TestController(object):
     process = None
     #: str, process stdout+stderr
     stdout = None
-    #: bool, whether to capture process stdout & stderr
-    buffer_output = False
 
     def __init__(self):
         self.cmd = []
         self.env = {}
         self.dirs = []
 
-    def launch(self):
+    def setup(self):
+        """Create temporary directories etc.
+        
+        This is only called when we know the test group will be run. Things
+        created here may be cleaned up by self.cleanup().
+        """
+        pass
+
+    def launch(self, buffer_output=False, capture_output=False):
         # print('*** ENV:', self.env)  # dbg
         # print('*** CMD:', self.cmd)  # dbg
         env = os.environ.copy()
         env.update(self.env)
-        output = subprocess.PIPE if self.buffer_output else None
-        stdout = subprocess.STDOUT if self.buffer_output else None
-        self.process = subprocess.Popen(self.cmd, stdout=output,
-                stderr=stdout, env=env)
+        if buffer_output:
+            capture_output = True
+        self.stdout_capturer = c = StreamCapturer(echo=not buffer_output)
+        c.start()
+        stdout = c.writefd if capture_output else None
+        stderr = subprocess.STDOUT if capture_output else None
+        self.process = subprocess.Popen(self.cmd, stdout=stdout,
+                stderr=stderr, env=env)
 
     def wait(self):
-        self.stdout, _ = self.process.communicate()
+        self.process.wait()
+        self.stdout_capturer.halt()
+        self.stdout = self.stdout_capturer.get_buffer()
         return self.process.returncode
+
+    def print_extra_info(self):
+        """Print extra information about this test run.
+        
+        If we're running in parallel and showing the concise view, this is only
+        called if the test group fails. Otherwise, it's called before the test
+        group is started.
+        
+        The base implementation does nothing, but it can be overridden by
+        subclasses.
+        """
+        return
 
     def cleanup_process(self):
         """Cleanup on exit by killing any leftover processes."""
@@ -104,18 +146,22 @@ class TestController(object):
 
     __del__ = cleanup
 
+
 class PyTestController(TestController):
     """Run Python tests using IPython.testing.iptest"""
     #: str, Python command to execute in subprocess
     pycmd = None
 
-    def __init__(self, section):
+    def __init__(self, section, options):
         """Create new test runner."""
         TestController.__init__(self)
         self.section = section
         # pycmd is put into cmd[2] in PyTestController.launch()
         self.cmd = [sys.executable, '-c', None, section]
         self.pycmd = "from IPython.testing.iptest import run_iptest; run_iptest()"
+        self.options = options
+
+    def setup(self):
         ipydir = TemporaryDirectory()
         self.dirs.append(ipydir)
         self.env['IPYTHONDIR'] = ipydir.name
@@ -124,6 +170,37 @@ class PyTestController(TestController):
         self.env['IPTEST_WORKING_DIR'] = workingdir.name
         # This means we won't get odd effects from our own matplotlib config
         self.env['MPLCONFIGDIR'] = workingdir.name
+        # For security reasons (http://bugs.python.org/issue16202), use
+        # a temporary directory to which other users have no access.
+        self.env['TMPDIR'] = workingdir.name
+
+        # Add a non-accessible directory to PATH (see gh-7053)
+        noaccess = os.path.join(self.workingdir.name, "_no_access_")
+        self.noaccess = noaccess
+        os.mkdir(noaccess, 0)
+
+        PATH = os.environ.get('PATH', '')
+        if PATH:
+            PATH = noaccess + os.pathsep + PATH
+        else:
+            PATH = noaccess
+        self.env['PATH'] = PATH
+
+        # From options:
+        if self.options.xunit:
+            self.add_xunit()
+        if self.options.coverage:
+            self.add_coverage()
+        self.env['IPTEST_SUBPROC_STREAMS'] = self.options.subproc_streams
+        self.cmd.extend(self.options.extra_args)
+
+    def cleanup(self):
+        """
+        Make the non-accessible directory created in setup() accessible
+        again, otherwise deleting the workingdir will fail.
+        """
+        os.chmod(self.noaccess, stat.S_IRWXU)
+        TestController.cleanup(self)
 
     @property
     def will_run(self):
@@ -155,125 +232,45 @@ class PyTestController(TestController):
         self.env['COVERAGE_PROCESS_START'] = config_file
         self.pycmd = "import coverage; coverage.process_startup(); " + self.pycmd
 
-    def launch(self):
+    def launch(self, buffer_output=False):
         self.cmd[2] = self.pycmd
-        super(PyTestController, self).launch()
+        super(PyTestController, self).launch(buffer_output=buffer_output)
 
-js_prefix = 'js/'
-
-def get_js_test_dir():
-    import IPython.html.tests as t
-    return os.path.join(os.path.dirname(t.__file__), '')
-
-def all_js_groups():
-    import glob
-    test_dir = get_js_test_dir()
-    all_subdirs = glob.glob(test_dir + '*/')
-    return [js_prefix+os.path.relpath(x, test_dir) for x in all_subdirs if os.path.relpath(x, test_dir) != '__pycache__']
-
-class JSController(TestController):
-    """Run CasperJS tests """
-    def __init__(self, section):
-        """Create new test runner."""
-        TestController.__init__(self)
-        self.section = section
-
-
-    def launch(self):
-        self.ipydir = TemporaryDirectory()
-        self.nbdir = TemporaryDirectory()
-        print("Running %s tests in directory: %r" % (self.section, self.nbdir.name))
-        os.makedirs(os.path.join(self.nbdir.name, os.path.join(u'sub ∂ir1', u'sub ∂ir 1a')))
-        os.makedirs(os.path.join(self.nbdir.name, os.path.join(u'sub ∂ir2', u'sub ∂ir 1b')))
-        self.dirs.append(self.ipydir)
-        self.dirs.append(self.nbdir)
-        
-        # start the ipython notebook, so we get the port number
-        self._init_server()
-        js_test_dir = get_js_test_dir()
-        includes = '--includes=' + os.path.join(js_test_dir,'util.js')
-        test_cases = os.path.join(js_test_dir, self.section[len(js_prefix):])
-        port = '--port=' + str(self.server_port)
-        self.cmd = ['casperjs', 'test', port, includes, test_cases]
-        super(JSController, self).launch()
-
-    @property
-    def will_run(self):
-        return all(have[a] for a in ['zmq', 'tornado', 'jinja2', 'casperjs'])
-
-    def _init_server(self):
-        "Start the notebook server in a separate process"
-        self.queue = q = Queue()
-        self.server = Process(target=run_webapp, args=(q, self.ipydir.name, self.nbdir.name))
-        self.server.start()
-        self.server_port = q.get()
-
-    def cleanup(self):
-        self.server.terminate()
-        self.server.join()
-        TestController.cleanup(self)
-
-def run_webapp(q, ipydir, nbdir, loglevel=0):
-    """start the IPython Notebook, and pass port back to the queue"""
-    import os
-    import IPython.html.notebookapp as nbapp
-    import sys
-    sys.stderr = open(os.devnull, 'w')
-    server = nbapp.NotebookApp()
-    args = ['--no-browser']
-    args.extend(['--ipython-dir', ipydir])
-    args.extend(['--notebook-dir', nbdir])
-    args.extend(['--log-level', str(loglevel)])
-    server.initialize(args)
-    # communicate the port number to the parent process
-    q.put(server.port)
-    server.start()
 
 def prepare_controllers(options):
     """Returns two lists of TestController instances, those to run, and those
     not to run."""
     testgroups = options.testgroups
+    if not testgroups:
+        testgroups = py_test_group_names
 
-    if testgroups:
-        py_testgroups = [g for g in testgroups if (g in py_test_group_names) \
-                                                or g.startswith('IPython.')]
-        if 'js' in testgroups:
-            js_testgroups = all_js_groups()
-        else:
-            js_testgroups = [g for g in testgroups if g not in py_testgroups]
-    else:
-        py_testgroups = py_test_group_names
-        js_testgroups = all_js_groups()
-        if not options.all:
-            test_sections['parallel'].enabled = False
+    controllers = [PyTestController(name, options) for name in testgroups]
 
-    c_js = [JSController(name) for name in js_testgroups]
-    c_py = [PyTestController(name) for name in py_testgroups]
-
-    configure_py_controllers(c_py, xunit=options.xunit,
-            coverage=options.coverage, subproc_streams=options.subproc_streams,
-            extra_args=options.extra_args)
-
-    controllers = c_py + c_js
     to_run = [c for c in controllers if c.will_run]
     not_run = [c for c in controllers if not c.will_run]
     return to_run, not_run
 
-def configure_py_controllers(controllers, xunit=False, coverage=False,
-                             subproc_streams='capture', extra_args=()):
-    """Apply options for a collection of TestController objects."""
-    for controller in controllers:
-        if xunit:
-            controller.add_xunit()
-        if coverage:
-            controller.add_coverage()
-        controller.env['IPTEST_SUBPROC_STREAMS'] = subproc_streams
-        controller.cmd.extend(extra_args)
-
-def do_run(controller):
+def do_run(controller, buffer_output=True):
+    """Setup and run a test controller.
+    
+    If buffer_output is True, no output is displayed, to avoid it appearing
+    interleaved. In this case, the caller is responsible for displaying test
+    output on failure.
+    
+    Returns
+    -------
+    controller : TestController
+      The same controller as passed in, as a convenience for using map() type
+      APIs.
+    exitcode : int
+      The exit code of the test subprocess. Non-zero indicates failure.
+    """
     try:
         try:
-            controller.launch()
+            controller.setup()
+            if not buffer_output:
+                controller.print_extra_info()
+            controller.launch(buffer_output=buffer_output)
         except Exception:
             import traceback
             traceback.print_exc()
@@ -347,8 +344,10 @@ def run_iptestall(options):
       is passed, one process is used per CPU core. Default 1 (i.e. sequential)
 
     inc_slow : bool
-      Include slow tests, like IPython.parallel. By default, these tests aren't
-      run.
+      Include slow tests. By default, these tests aren't run.
+
+    url : unicode
+      Address:port to use when running the JS tests.
 
     xunit : bool
       Produce Xunit XML output. This is written to multiple foo.xunit.xml files.
@@ -360,10 +359,6 @@ def run_iptestall(options):
     extra_args : list
       Extra arguments to pass to the test subprocesses, e.g. '-v'
     """
-    if options.fast != 1:
-        # If running in parallel, capture output so it doesn't get interleaved
-        TestController.buffer_output = True
-
     to_run, not_run = prepare_controllers(options)
 
     def justify(ltext, rtext, width=70, fill='-'):
@@ -379,9 +374,9 @@ def run_iptestall(options):
     if options.fast == 1:
         # This actually means sequential, i.e. with 1 job
         for controller in to_run:
-            print('IPython test group:', controller.section)
+            print('Test group:', controller.section)
             sys.stdout.flush()  # Show in correct order when output is piped
-            controller, res = do_run(controller)
+            controller, res = do_run(controller, buffer_output=False)
             if res:
                 failed.append(controller)
                 if res == -signal.SIGINT:
@@ -395,8 +390,9 @@ def run_iptestall(options):
             pool = multiprocessing.pool.ThreadPool(options.fast)
             for (controller, res) in pool.imap_unordered(do_run, to_run):
                 res_string = 'OK' if res == 0 else 'FAILED'
-                print(justify('IPython test group: ' + controller.section, res_string))
+                print(justify('Test group: ' + controller.section, res_string))
                 if res:
+                    controller.print_extra_info()
                     print(bytes_to_str(controller.stdout))
                     failed.append(controller)
                     if res == -signal.SIGINT:
@@ -406,7 +402,7 @@ def run_iptestall(options):
             return
 
     for controller in not_run:
-        print(justify('IPython test group: ' + controller.section, 'NOT RUN'))
+        print(justify('Test group: ' + controller.section, 'NOT RUN'))
 
     t_end = time.time()
     t_tests = t_end - t_start
@@ -432,7 +428,7 @@ def run_iptestall(options):
         print()
 
     if options.coverage:
-        from coverage import coverage
+        from coverage import coverage, CoverageException
         cov = coverage(data_file='.coverage')
         cov.combine()
         cov.save()
@@ -457,8 +453,8 @@ def run_iptestall(options):
                         cu.name = '.'.join(nameparts[ix:])
 
             # Reimplement the html_report method with our custom reporter
-            cov._harvest_data()
-            cov.config.from_args(omit='*%stests' % os.sep, html_dir=html_dir,
+            cov.get_data()
+            cov.config.from_args(omit='*{0}tests{0}*'.format(os.sep), html_dir=html_dir,
                                  html_title='IPython test coverage',
                                 )
             reporter = CustomHtmlReporter(cov, cov.config)
@@ -467,7 +463,12 @@ def run_iptestall(options):
 
         # Coverage XML report
         elif options.coverage == 'xml':
-            cov.xml_report(outfile='ipy_coverage.xml')
+            try:
+                cov.xml_report(outfile='ipy_coverage.xml')
+            except CoverageException as e:
+                print('Generating coverage report failed. Are you running javascript tests only?')
+                import traceback
+                traceback.print_exc()
 
     if failed:
         # Ensure that our exit code indicates failure
@@ -479,8 +480,10 @@ argparser.add_argument('testgroups', nargs='*',
                     'all tests.')
 argparser.add_argument('--all', action='store_true',
                     help='Include slow tests not run by default.')
+argparser.add_argument('--url', help="URL to use for the JS tests.")
 argparser.add_argument('-j', '--fast', nargs='?', const=None, default=1, type=int,
-                    help='Run test sections in parallel.')
+                    help='Run test sections in parallel. This starts as many '
+                    'processes as you have cores, or you can specify a number.')
 argparser.add_argument('--xunit', action='store_true',
                     help='Produce Xunit XML results')
 argparser.add_argument('--coverage', nargs='?', const=True, default=False,
@@ -499,6 +502,14 @@ def default_options():
     return options
 
 def main():
+    # iptest doesn't work correctly if the working directory is the
+    # root of the IPython source tree. Tell the user to avoid
+    # frustration.
+    if os.path.exists(os.path.join(os.getcwd(),
+                                   'IPython', 'testing', '__main__.py')):
+        print("Don't run iptest from the IPython source directory",
+              file=sys.stderr)
+        sys.exit(1)
     # Arguments after -- should be passed through to nose. Argparse treats
     # everything after -- as regular positional arguments, so we separate them
     # first.

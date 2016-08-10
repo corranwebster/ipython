@@ -1,30 +1,21 @@
 # encoding: utf-8
-"""A class for managing IPython extensions.
+"""A class for managing IPython extensions."""
 
-Authors:
-
-* Brian Granger
-"""
-
-#-----------------------------------------------------------------------------
-#  Copyright (C) 2010-2011  The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
-
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 
 import os
 from shutil import copyfile
 import sys
 
-from IPython.config.configurable import Configurable
-from IPython.utils.traitlets import Instance
-from IPython.utils.py3compat import PY3
-if PY3:
+from traitlets.config.configurable import Configurable
+from IPython.utils.path import ensure_dir_exists
+from traitlets import Instance
+
+try:
+    from importlib import reload
+except ImportError :
+    ## deprecated since 3.4
     from imp import reload
 
 #-----------------------------------------------------------------------------
@@ -58,27 +49,21 @@ class ExtensionManager(Configurable):
     is added to ``sys.path`` automatically.
     """
 
-    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
+    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC', allow_none=True)
 
     def __init__(self, shell=None, **kwargs):
         super(ExtensionManager, self).__init__(shell=shell, **kwargs)
-        self.shell.on_trait_change(
-            self._on_ipython_dir_changed, 'ipython_dir'
+        self.shell.observe(
+            self._on_ipython_dir_changed, names=('ipython_dir',)
         )
         self.loaded = set()
-
-    def __del__(self):
-        self.shell.on_trait_change(
-            self._on_ipython_dir_changed, 'ipython_dir', remove=True
-        )
 
     @property
     def ipython_extension_dir(self):
         return os.path.join(self.shell.ipython_dir, u'extensions')
 
-    def _on_ipython_dir_changed(self):
-        if not os.path.isdir(self.ipython_extension_dir):
-            os.makedirs(self.ipython_extension_dir, mode = 0o777)
+    def _on_ipython_dir_changed(self, change):
+        ensure_dir_exists(self.ipython_extension_dir)
 
     def load_extension(self, module_str):
         """Load an IPython extension by its module name.
@@ -162,8 +147,7 @@ class ExtensionManager(Configurable):
         Returns the full path to the installed file.
         """
         # Ensure the extension directory exists
-        if not os.path.isdir(self.ipython_extension_dir):
-            os.makedirs(self.ipython_extension_dir, mode = 0o777)
+        ensure_dir_exists(self.ipython_extension_dir)
 
         if os.path.isfile(url):
             src_filename = os.path.basename(url)

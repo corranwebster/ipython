@@ -37,6 +37,7 @@ example, you could use a startup file like this::
 
 import os
 import subprocess
+import warnings
 import sys
 
 from IPython.core.error import TryNext
@@ -48,6 +49,11 @@ __all__ = ['editor', 'fix_error_editor', 'synchronize_with_editor',
            'shutdown_hook', 'late_startup_hook',
            'show_in_pager','pre_prompt_hook',
            'pre_run_code_hook', 'clipboard_get']
+
+deprecated = {'pre_run_code_hook': "a callback for the 'pre_execute' or 'pre_run_cell' event",
+              'late_startup_hook': "a callback for the 'shell_initialized' event",
+              'shutdown_hook': "the atexit module",
+             }
 
 def editor(self, filename, linenum=None, wait=True):
     """Open the default editor at the given filename and linenumber.
@@ -78,13 +84,24 @@ def editor(self, filename, linenum=None, wait=True):
 
 import tempfile
 def fix_error_editor(self,filename,linenum,column,msg):
-    """Open the editor at the given filename, linenumber, column and
+    """DEPRECATED
+
+    Open the editor at the given filename, linenumber, column and
     show an error message. This is used for correcting syntax errors.
     The current implementation only has special support for the VIM editor,
     and falls back on the 'editor' hook if VIM is not used.
 
-    Call ip.set_hook('fix_error_editor',youfunc) to use your own function,
+    Call ip.set_hook('fix_error_editor',yourfunc) to use your own function,
     """
+
+    warnings.warn("""
+`fix_error_editor` is pending deprecation as of IPython 5.0 and will be removed
+in future versions. It appears to be used only for automatically fixing syntax
+error that has been broken for a few years and has thus been removed. If you
+happend to use this function and still need it please make your voice heard on
+the mailing list ipython-dev@scipy.org , or on the GitHub Issue tracker:
+https://github.com/ipython/ipython/issues/9649 """, UserWarning)
+
     def vim_quickfix_file():
         t = tempfile.NamedTemporaryFile()
         t.write('%s:%d:%d:%s\n' % (filename,linenum,column,msg))
@@ -168,7 +185,7 @@ def late_startup_hook(self):
     #print "default startup hook ok" # dbg
 
 
-def show_in_pager(self,s):
+def show_in_pager(self, data, start, screen_lines):
     """ Run a string through pager """
     # raising TryNext here will use the default paging functionality
     raise TryNext

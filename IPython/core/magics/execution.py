@@ -1,25 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Implementation of execution-related magic functions.
-"""
+"""Implementation of execution-related magic functions."""
+
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
+
 from __future__ import print_function
-#-----------------------------------------------------------------------------
-#  Copyright (c) 2012 The IPython Development Team.
-#
-#  Distributed under the terms of the Modified BSD License.
-#
-#  The full license is in the file COPYING.txt, distributed with this software.
-#-----------------------------------------------------------------------------
+from __future__ import absolute_import
 
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
-
-# Stdlib
 import ast
 import bdb
+import gc
+import itertools
 import os
 import sys
 import time
+import timeit
 from pdb import Restart
 
 # cProfile was added in Python2.5
@@ -33,8 +28,7 @@ except ImportError:
     except ImportError:
         profile = pstats = None
 
-# Our own packages
-from IPython.core import debugger, oinspect
+from IPython.core import oinspect
 from IPython.core import magic_arguments
 from IPython.core import page
 from IPython.core.error import UsageError
@@ -45,12 +39,13 @@ from IPython.testing.skipdoctest import skip_doctest
 from IPython.utils import py3compat
 from IPython.utils.py3compat import builtin_mod, iteritems, PY3
 from IPython.utils.contexts import preserve_keys
-from IPython.utils.io import capture_output
+from IPython.utils.capture import capture_output
 from IPython.utils.ipstruct import Struct
 from IPython.utils.module_paths import find_mod
-from IPython.utils.path import get_py_filename, unquote_filename, shellglob
+from IPython.utils.path import get_py_filename, shellglob
 from IPython.utils.timing import clock, clock2
-from IPython.utils.warn import warn, error
+from warnings import warn
+from logging import error
 
 if PY3:
     from io import StringIO
@@ -66,26 +61,31 @@ class TimeitResult(object):
     """
     Object returned by the timeit magic with info about the run.
 
-    Contain the following attributes :
+    Contains the following attributes :
 
-    loops: (int) number of loop done per measurement
-    repeat: (int) number of time the mesurement has been repeated
-    best: (float) best execusion time / number
-    all_runs: (list of float) execusion time of each run (in s)
+    loops: (int) number of loops done per measurement
+    repeat: (int) number of times the measurement has been repeated
+    best: (float) best execution time / number
+    all_runs: (list of float) execution time of each run (in s)
     compile_time: (float) time of statement compilation (s)
 
     """
 
-    def __init__(self, loops, repeat, best, all_runs, compile_time, precision):
+    def __init__(self, loops, repeat, best, worst, all_runs, compile_time, precision):
         self.loops = loops
         self.repeat = repeat
         self.best = best
+        self.worst = worst
         self.all_runs = all_runs
         self.compile_time = compile_time
         self._precision = precision
 
     def _repr_pretty_(self, p , cycle):
-         unic =  u"%d loops, best of %d: %s per loop" % (self.loops, self.repeat,
+         if self.loops == 1:  # No s at "loops" if only one loop
+             unic =  u"%d loop, best of %d: %s per loop" % (self.loops, self.repeat,
+                                            _format_time(self.best, self._precision))
+         else:
+             unic =  u"%d loops, best of %d: %s per loop" % (self.loops, self.repeat,
                                             _format_time(self.best, self._precision))
          p.text(u'<TimeitResult : '+unic+u'>')
 
@@ -113,6 +113,34 @@ class TimeitTemplateFiller(ast.NodeTransformer):
         if getattr(getattr(node.body[0], 'value', None), 'id', None) == 'stmt':
             node.body = self.ast_stmt.body
         return node
+
+
+class Timer(timeit.Timer):
+    """Timer class that explicitly uses self.inner
+    
+    which is an undocumented implementation detail of CPython,
+    not shared by PyPy.
+    """
+    # Timer.timeit copied from CPython 3.4.2
+    def timeit(self, number=timeit.default_number):
+        """Time 'number' executions of the main statement.
+
+        To be precise, this executes the setup statement once, and
+        then returns the time it takes to execute the main statement
+        a number of times, as a float measured in seconds.  The
+        argument is the number of times through the loop, defaulting
+        to one million.  The main statement, the setup statement and
+        the timer function to be used are passed to the constructor.
+        """
+        it = itertools.repeat(None, number)
+        gcold = gc.isenabled()
+        gc.disable()
+        try:
+            timing = self.inner(it, self.timer)
+        finally:
+            if gcold:
+                gc.enable()
+        return timing
 
 
 @magics_class
@@ -310,12 +338,10 @@ python-profiler package from non-free.""")
         dump_file = opts.D[0]
         text_file = opts.T[0]
         if dump_file:
-            dump_file = unquote_filename(dump_file)
             prof.dump_stats(dump_file)
             print('\n*** Profile stats marshalled to file',\
                   repr(dump_file)+'.',sys_exit)
         if text_file:
-            text_file = unquote_filename(text_file)
             pfile = open(text_file,'w')
             pfile.write(output)
             pfile.close()
@@ -679,55 +705,54 @@ python-profiler package from non-free.""")
 
         try:
             stats = None
-            with self.shell.readline_no_record:
-                if 'p' in opts:
-                    stats = self._run_with_profiler(code, opts, code_ns)
+            if 'p' in opts:
+                stats = self._run_with_profiler(code, opts, code_ns)
+            else:
+                if 'd' in opts:
+                    bp_file, bp_line = parse_breakpoint(
+                        opts.get('b', ['1'])[0], filename)
+                    self._run_with_debugger(
+                        code, code_ns, filename, bp_line, bp_file)
                 else:
-                    if 'd' in opts:
-                        bp_file, bp_line = parse_breakpoint(
-                            opts.get('b', ['1'])[0], filename)
-                        self._run_with_debugger(
-                            code, code_ns, filename, bp_line, bp_file)
+                    if 'm' in opts:
+                        def run():
+                            self.shell.safe_run_module(modulename, prog_ns)
                     else:
-                        if 'm' in opts:
-                            def run():
-                                self.shell.safe_run_module(modulename, prog_ns)
-                        else:
-                            if runner is None:
-                                runner = self.default_runner
-                            if runner is None:
-                                runner = self.shell.safe_execfile
+                        if runner is None:
+                            runner = self.default_runner
+                        if runner is None:
+                            runner = self.shell.safe_execfile
 
-                            def run():
-                                runner(filename, prog_ns, prog_ns,
-                                       exit_ignore=exit_ignore)
+                        def run():
+                            runner(filename, prog_ns, prog_ns,
+                                    exit_ignore=exit_ignore)
 
-                        if 't' in opts:
-                            # timed execution
-                            try:
-                                nruns = int(opts['N'][0])
-                                if nruns < 1:
-                                    error('Number of runs must be >=1')
-                                    return
-                            except (KeyError):
-                                nruns = 1
-                            self._run_with_timing(run, nruns)
-                        else:
-                            # regular execution
-                            run()
+                    if 't' in opts:
+                        # timed execution
+                        try:
+                            nruns = int(opts['N'][0])
+                            if nruns < 1:
+                                error('Number of runs must be >=1')
+                                return
+                        except (KeyError):
+                            nruns = 1
+                        self._run_with_timing(run, nruns)
+                    else:
+                        # regular execution
+                        run()
 
-                if 'i' in opts:
-                    self.shell.user_ns['__name__'] = __name__save
-                else:
-                    # update IPython interactive namespace
+            if 'i' in opts:
+                self.shell.user_ns['__name__'] = __name__save
+            else:
+                # update IPython interactive namespace
 
-                    # Some forms of read errors on the file may mean the
-                    # __name__ key was never set; using pop we don't have to
-                    # worry about a possible KeyError.
-                    prog_ns.pop('__name__', None)
+                # Some forms of read errors on the file may mean the
+                # __name__ key was never set; using pop we don't have to
+                # worry about a possible KeyError.
+                prog_ns.pop('__name__', None)
 
-                    with preserve_keys(self.shell.user_ns, '__file__'):
-                        self.shell.user_ns.update(prog_ns)
+                with preserve_keys(self.shell.user_ns, '__file__'):
+                    self.shell.user_ns.update(prog_ns)
         finally:
             # It's a bit of a mystery why, but __builtins__ can change from
             # being a module to becoming a dict missing some key data after
@@ -776,7 +801,11 @@ python-profiler package from non-free.""")
             If the break point given by `bp_line` is not valid.
 
         """
-        deb = debugger.Pdb(self.shell.colors)
+        deb = self.shell.InteractiveTB.pdb
+        if not deb:
+            self.shell.InteractiveTB.pdb = self.shell.InteractiveTB.debugger_cls()
+            deb = self.shell.InteractiveTB.pdb
+
         # reset Breakpoint state, which is moronically kept
         # in a class
         bdb.Breakpoint.next = 1
@@ -934,7 +963,7 @@ python-profiler package from non-free.""")
           In [5]: import time
 
           In [6]: %timeit -n1 time.sleep(2)
-          1 loops, best of 3: 2 s per loop
+          1 loop, best of 3: 2 s per loop
 
 
         The times reported by %timeit will be slightly higher than those
@@ -944,8 +973,6 @@ python-profiler package from non-free.""")
         statement to import function or create variables. Generally, the bias
         does not matter as long as results from timeit.py are not mixed with
         those from %timeit."""
-
-        import timeit
 
         opts, stmt = self.parse_options(line,'n:r:tcp:qo',
                                         posix=False, strict=False)
@@ -963,7 +990,7 @@ python-profiler package from non-free.""")
         if hasattr(opts, "c"):
             timefunc = clock
 
-        timer = timeit.Timer(timer=timefunc)
+        timer = Timer(timer=timefunc)
         # this code has tight coupling to the inner workings of timeit.Timer,
         # but is there a better way to achieve that the code stmt has access
         # to the shell namespace?
@@ -971,11 +998,11 @@ python-profiler package from non-free.""")
 
         if cell is None:
             # called as line magic
-            ast_setup = ast.parse("pass")
-            ast_stmt = ast.parse(transform(stmt))
+            ast_setup = self.shell.compile.ast_parse("pass")
+            ast_stmt = self.shell.compile.ast_parse(transform(stmt))
         else:
-            ast_setup = ast.parse(transform(stmt))
-            ast_stmt = ast.parse(transform(cell))
+            ast_setup = self.shell.compile.ast_parse(transform(stmt))
+            ast_stmt = self.shell.compile.ast_parse(transform(cell))
 
         ast_setup = self.shell.transform_ast(ast_setup)
         ast_stmt = self.shell.transform_ast(ast_stmt)
@@ -999,29 +1026,53 @@ python-profiler package from non-free.""")
         tc_min = 0.1
 
         t0 = clock()
-        code = compile(timeit_ast, "<magic-timeit>", "exec")
+        code = self.shell.compile(timeit_ast, "<magic-timeit>", "exec")
         tc = clock()-t0
 
         ns = {}
         exec(code, self.shell.user_ns, ns)
         timer.inner = ns["inner"]
 
+        # This is used to check if there is a huge difference between the
+        # best and worst timings.
+        # Issue: https://github.com/ipython/ipython/issues/6471
+        worst_tuning = 0
         if number == 0:
             # determine number so that 0.2 <= total time < 2.0
             number = 1
             for _ in range(1, 10):
-                if timer.timeit(number) >= 0.2:
+                time_number = timer.timeit(number)
+                worst_tuning = max(worst_tuning, time_number / number)
+                if time_number >= 0.2:
                     break
                 number *= 10
         all_runs = timer.repeat(repeat, number)
         best = min(all_runs) / number
+
+        worst = max(all_runs) / number
+        if worst_tuning:
+            worst = max(worst, worst_tuning)
+
         if not quiet :
-            print(u"%d loops, best of %d: %s per loop" % (number, repeat,
+            # Check best timing is greater than zero to avoid a
+            # ZeroDivisionError.
+            # In cases where the slowest timing is lesser than a micosecond
+            # we assume that it does not really matter if the fastest
+            # timing is 4 times faster than the slowest timing or not.
+            if worst > 4 * best and best > 0 and worst > 1e-6:
+                print("The slowest run took %0.2f times longer than the "
+                      "fastest. This could mean that an intermediate result "
+                      "is being cached." % (worst / best))
+            if number == 1:  # No s at "loops" if only one loop
+                print(u"%d loop, best of %d: %s per loop" % (number, repeat,
+                                                              _format_time(best, precision)))
+            else:
+                print(u"%d loops, best of %d: %s per loop" % (number, repeat,
                                                               _format_time(best, precision)))
             if tc > tc_min:
                 print("Compiler time: %.2f s" % tc)
         if return_result:
-            return TimeitResult(number, repeat, best, all_runs, tc, precision)
+            return TimeitResult(number, repeat, best, worst, all_runs, tc, precision)
 
     @skip_doctest
     @needs_local_scope
@@ -1042,7 +1093,7 @@ python-profiler package from non-free.""")
           following statement raises an error).
 
         This function provides very basic timing functionality.  Use the timeit 
-        magic for more controll over the measurement.
+        magic for more control over the measurement.
 
         Examples
         --------
@@ -1095,7 +1146,7 @@ python-profiler package from non-free.""")
         tp_min = 0.1
 
         t0 = clock()
-        expr_ast = ast.parse(expr)
+        expr_ast = self.shell.compile.ast_parse(expr)
         tp = clock()-t0
 
         # Apply AST transformations
@@ -1112,7 +1163,7 @@ python-profiler package from non-free.""")
             mode = 'exec'
             source = '<timed exec>'
         t0 = clock()
-        code = compile(expr_ast, source, mode)
+        code = self.shell.compile(expr_ast, source, mode)
         tc = clock()-t0
 
         # skew measurement as little as possible

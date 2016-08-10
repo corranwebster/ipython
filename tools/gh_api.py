@@ -17,9 +17,9 @@ import json
 try:
     import requests_cache
 except ImportError:
-    print("no cache")
+    print("cache not available, install `requests_cache` for caching.", file=sys.stderr)
 else:
-    requests_cache.install_cache("gh_api")
+    requests_cache.install_cache("gh_api", expire_after=3600)
 
 # Keyring stores passwords by a 'username', but we're not storing a username and
 # password
@@ -49,10 +49,11 @@ def get_auth_token():
         return token
 
     print("Please enter your github username and password. These are not "
-           "stored, only used to get an oAuth token. You can revoke this at "
-           "any time on Github.")
-    user = input("Username: ")
-    pw = getpass.getpass("Password: ")
+          "stored, only used to get an oAuth token. You can revoke this at "
+          "any time on Github.\n"
+          "Username: ", file=sys.stderr, end='')
+    user = input('')
+    pw = getpass.getpass("Password: ", stream=sys.stderr)
 
     auth_request = {
       "scopes": [
@@ -64,6 +65,14 @@ def get_auth_token():
     }
     response = requests.post('https://api.github.com/authorizations',
                             auth=(user, pw), data=json.dumps(auth_request))
+    if response.status_code == 401 and \
+       response.headers.get('X-GitHub-OTP') == 'required; sms':
+        print("Your login API resquest a SMS one time password", file=sys.stderr)
+        sms_pw = getpass.getpass("SMS password: ", stream=sys.stderr)
+        response = requests.post('https://api.github.com/authorizations',
+                            auth=(user, pw), 
+                            data=json.dumps(auth_request),
+                            headers={'X-GitHub-OTP':sms_pw})
     response.raise_for_status()
     token = json.loads(response.text)['token']
     keyring.set_password('github', fake_username, token)
@@ -103,6 +112,7 @@ def get_pull_request(project, num, auth=False):
         header = make_auth_header()
     else:
         header = None
+    print("fetching %s" % url, file=sys.stderr)
     response = requests.get(url, headers=header)
     response.raise_for_status()
     return json.loads(response.text, object_hook=Obj)
@@ -124,7 +134,11 @@ def get_paged_request(url, headers=None, **params):
     results = []
     params.setdefault("per_page", 100)
     while True:
-        print("fetching %s with %s" % (url, params), file=sys.stderr)
+        if '?' in url:
+            params = None
+            print("fetching %s" % url, file=sys.stderr)
+        else:
+            print("fetching %s with %s" % (url, params), file=sys.stderr)
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         results.extend(response.json())
@@ -142,7 +156,7 @@ def get_pulls_list(project, auth=False, **params):
         headers = make_auth_header()
     else:
         headers = None
-    pages = get_paged_request(url, headers=headers, params=params)
+    pages = get_paged_request(url, headers=headers, **params)
     return pages
 
 def get_issues_list(project, auth=False, **params):
@@ -157,6 +171,7 @@ def get_issues_list(project, auth=False, **params):
     return pages
 
 def get_milestones(project, auth=False, **params):
+    params.setdefault('state', 'all')
     url = "https://api.github.com/repos/{project}/milestones".format(project=project)
     if auth:
         headers = make_auth_header()
@@ -176,6 +191,18 @@ def get_milestone_id(project, milestone, auth=False, **params):
 def is_pull_request(issue):
     """Return True if the given issue is a pull request."""
     return bool(issue.get('pull_request', {}).get('html_url', None))
+
+def get_authors(pr):
+    print("getting authors for #%i" % pr['number'], file=sys.stderr)
+    h = make_auth_header()
+    r = requests.get(pr['commits_url'], headers=h)
+    r.raise_for_status()
+    commits = r.json()
+    authors = []
+    for commit in commits:
+        author = commit['commit']['author']
+        authors.append("%s <%s>" % (author['name'], author['email']))
+    return authors
 
 # encode_multipart_formdata is from urllib3.filepost
 # The only change is to iter_fields, to enforce S3's required key ordering

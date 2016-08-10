@@ -5,92 +5,70 @@ Inheritance diagram:
 
 .. inheritance-diagram:: IPython.core.formatters
    :parts: 3
-
-Authors:
-
-* Robert Kern
-* Brian Granger
 """
-#-----------------------------------------------------------------------------
-# Copyright (C) 2010-2011, IPython Development Team.
-#
+
+# Copyright (c) IPython Development Team.
 # Distributed under the terms of the Modified BSD License.
-#
-# The full license is in the file COPYING.txt, distributed with this software.
-#-----------------------------------------------------------------------------
 
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
-
-# Stdlib imports
 import abc
+import json
 import sys
+import traceback
 import warnings
 
-from IPython.external.decorator import decorator
+from decorator import decorator
 
-# Our own imports
-from IPython.config.configurable import Configurable
+from traitlets.config.configurable import Configurable
+from IPython.core.getipython import get_ipython
+from IPython.utils.sentinel import Sentinel
+from IPython.utils.dir2 import get_real_method
 from IPython.lib import pretty
-from IPython.utils import io
-from IPython.utils.traitlets import (
+from traitlets import (
     Bool, Dict, Integer, Unicode, CUnicode, ObjectName, List,
+    ForwardDeclaredInstance,
+    default, observe,
 )
-from IPython.utils.warn import warn
 from IPython.utils.py3compat import (
-    unicode_to_str, with_metaclass, PY3, string_types, unicode_type,
+    with_metaclass, string_types, unicode_type,
 )
 
-if PY3:
-    from io import StringIO
-else:
-    from StringIO import StringIO
-
-
-#-----------------------------------------------------------------------------
-# The main DisplayFormatter class
-#-----------------------------------------------------------------------------
 
 class DisplayFormatter(Configurable):
 
-    # When set to true only the default plain text formatter will be used.
-    plain_text_only = Bool(False, config=True)
-    def _plain_text_only_changed(self, name, old, new):
-        warnings.warn("""DisplayFormatter.plain_text_only is deprecated.
-        
-        Use DisplayFormatter.active_types = ['text/plain']
-        for the same effect.
-        """, DeprecationWarning)
-        if new:
-            self.active_types = ['text/plain']
-        else:
-            self.active_types = self.format_types
-    
-    active_types = List(Unicode, config=True,
+    active_types = List(Unicode(),
         help="""List of currently active mime-types to display.
         You can use this to set a white-list for formats to display.
         
         Most users will not need to change this value.
-        """)
+        """).tag(config=True)
+
+    @default('active_types')
     def _active_types_default(self):
         return self.format_types
-    
-    def _active_types_changed(self, name, old, new):
+
+    @observe('active_types')
+    def _active_types_changed(self, change):
         for key, formatter in self.formatters.items():
-            if key in new:
+            if key in change['new']:
                 formatter.enabled = True
             else:
                 formatter.enabled = False
     
+    ipython_display_formatter = ForwardDeclaredInstance('FormatterABC')
+    @default('ipython_display_formatter')
+    def _default_formatter(self):
+        return IPythonDisplayFormatter(parent=self)
+    
     # A dict of formatter whose keys are format types (MIME types) and whose
     # values are subclasses of BaseFormatter.
     formatters = Dict()
+    @default('formatters')
     def _formatters_default(self):
         """Activate the default formatters."""
         formatter_classes = [
             PlainTextFormatter,
             HTMLFormatter,
+            MarkdownFormatter,
             SVGFormatter,
             PNGFormatter,
             PDFFormatter,
@@ -114,6 +92,7 @@ class DisplayFormatter(Configurable):
 
         * text/plain
         * text/html
+        * text/markdown
         * text/latex
         * application/json
         * application/javascript
@@ -150,7 +129,11 @@ class DisplayFormatter(Configurable):
         """
         format_dict = {}
         md_dict = {}
-
+        
+        if self.ipython_display_formatter(obj):
+            # object handled itself, don't proceed
+            return {}, {}
+        
         for format_type, formatter in self.formatters.items():
             if include and format_type not in include:
                 continue
@@ -185,31 +168,38 @@ class DisplayFormatter(Configurable):
 # Formatters for specific format types (text, html, svg, etc.)
 #-----------------------------------------------------------------------------
 
+
+def _safe_repr(obj):
+    """Try to return a repr of an object
+
+    always returns a string, at least.
+    """
+    try:
+        return repr(obj)
+    except Exception as e:
+        return "un-repr-able object (%r)" % e
+
+
 class FormatterWarning(UserWarning):
     """Warning class for errors in formatters"""
 
 @decorator
-def warn_format_error(method, self, *args, **kwargs):
-    """decorator for warning on failed format call"""
+def catch_format_error(method, self, *args, **kwargs):
+    """show traceback on failed format call"""
     try:
         r = method(self, *args, **kwargs)
-    except NotImplementedError as e:
+    except NotImplementedError:
         # don't warn on NotImplementedErrors
         return None
-    except Exception as e:
-        warnings.warn("Exception in %s formatter: %s" % (self.format_type, e),
-            FormatterWarning,
-        )
+    except Exception:
+        exc_info = sys.exc_info()
+        ip = get_ipython()
+        if ip is not None:
+            ip.showtraceback(exc_info)
+        else:
+            traceback.print_exception(*exc_info)
         return None
-    if r is None or isinstance(r, self._return_type) or \
-        (isinstance(r, tuple) and r and isinstance(r[0], self._return_type)):
-        return r
-    else:
-        warnings.warn(
-            "%s formatter returned invalid type %s (expected %s) for object: %s" % \
-            (self.format_type, type(r), self._return_type, pretty._safe_repr(args[0])),
-            FormatterWarning
-        )
+    return self._check_return(r, args[0])
 
 
 class FormatterABC(with_metaclass(abc.ABCMeta, object)):
@@ -228,7 +218,6 @@ class FormatterABC(with_metaclass(abc.ABCMeta, object)):
     enabled = True
     
     @abc.abstractmethod
-    @warn_format_error
     def __call__(self, obj):
         """Return a JSON'able representation of the object.
 
@@ -252,7 +241,13 @@ def _get_type(obj):
     """Return the type of an instance (old and new-style)"""
     return getattr(obj, '__class__', None) or type(obj)
 
-_raise_key_error = object()
+
+_raise_key_error = Sentinel('_raise_key_error', __name__, 
+"""
+Special value to raise a KeyError
+
+Raise KeyError in `BaseFormatter.pop` if passed as the default value to `pop`
+""")
 
 
 class BaseFormatter(Configurable):
@@ -283,23 +278,23 @@ class BaseFormatter(Configurable):
     format_type = Unicode('text/plain')
     _return_type = string_types
 
-    enabled = Bool(True, config=True)
+    enabled = Bool(True).tag(config=True)
 
     print_method = ObjectName('__repr__')
 
     # The singleton printers.
     # Maps the IDs of the builtin singleton objects to the format functions.
-    singleton_printers = Dict(config=True)
+    singleton_printers = Dict().tag(config=True)
 
     # The type-specific printers.
     # Map type objects to the format functions.
-    type_printers = Dict(config=True)
+    type_printers = Dict().tag(config=True)
 
     # The deferred-import type-specific printers.
     # Map (modulename, classname) pairs to the format functions.
-    deferred_printers = Dict(config=True)
+    deferred_printers = Dict().tag(config=True)
     
-    @warn_format_error
+    @catch_format_error
     def __call__(self, obj):
         """Compute the format for an object."""
         if self.enabled:
@@ -311,7 +306,7 @@ class BaseFormatter(Configurable):
             else:
                 return printer(obj)
             # Finally look for special method names
-            method = pretty._safe_getattr(obj, self.print_method, None)
+            method = get_real_method(obj, self.print_method)
             if method is not None:
                 return method()
             return None
@@ -326,6 +321,21 @@ class BaseFormatter(Configurable):
             return False
         else:
             return True
+    
+    def _check_return(self, r, obj):
+        """Check that a return value is appropriate
+        
+        Return the value if so, None otherwise, warning if invalid.
+        """
+        if r is None or isinstance(r, self._return_type) or \
+            (isinstance(r, tuple) and r and isinstance(r[0], self._return_type)):
+            return r
+        else:
+            warnings.warn(
+                "%s formatter returned invalid type %s (expected %s) for object: %s" % \
+                (self.format_type, type(r), self._return_type, _safe_repr(obj)),
+                FormatterWarning
+            )
     
     def lookup(self, obj):
         """Look up the formatter for a given instance.
@@ -549,29 +559,37 @@ class PlainTextFormatter(BaseFormatter):
 
     # This subclass ignores this attribute as it always need to return
     # something.
-    enabled = Bool(True, config=False)
-
+    enabled = Bool(True).tag(config=False)
+    
+    max_seq_length = Integer(pretty.MAX_SEQ_LENGTH,
+        help="""Truncate large collections (lists, dicts, tuples, sets) to this size.
+        
+        Set to 0 to disable truncation.
+        """
+    ).tag(config=True)
+    
     # Look for a _repr_pretty_ methods to use for pretty printing.
     print_method = ObjectName('_repr_pretty_')
 
     # Whether to pretty-print or not.
-    pprint = Bool(True, config=True)
+    pprint = Bool(True).tag(config=True)
 
     # Whether to be verbose or not.
-    verbose = Bool(False, config=True)
+    verbose = Bool(False).tag(config=True)
 
     # The maximum width.
-    max_width = Integer(79, config=True)
+    max_width = Integer(79).tag(config=True)
 
     # The newline character.
-    newline = Unicode('\n', config=True)
+    newline = Unicode('\n').tag(config=True)
 
     # format-string for pprinting floats
     float_format = Unicode('%r')
     # setter for float precision, either int or direct format-string
-    float_precision = CUnicode('', config=True)
+    float_precision = CUnicode('').tag(config=True)
 
-    def _float_precision_changed(self, name, old, new):
+    @observe('float_precision')
+    def _float_precision_changed(self, change):
         """float_precision changed, set float_format accordingly.
 
         float_precision can be set by int or str.
@@ -585,6 +603,7 @@ class PlainTextFormatter(BaseFormatter):
         This parameter can be set via the '%precision' magic.
         """
 
+        new = change['new']
         if '%' in new:
             # got explicit format string
             fmt = new
@@ -617,32 +636,36 @@ class PlainTextFormatter(BaseFormatter):
         self.float_format = fmt
 
     # Use the default pretty printers from IPython.lib.pretty.
+    @default('singleton_printers')
     def _singleton_printers_default(self):
         return pretty._singleton_pprinters.copy()
 
+    @default('type_printers')
     def _type_printers_default(self):
         d = pretty._type_pprinters.copy()
         d[float] = lambda obj,p,cycle: p.text(self.float_format%obj)
         return d
 
+    @default('deferred_printers')
     def _deferred_printers_default(self):
         return pretty._deferred_type_pprinters.copy()
 
     #### FormatterABC interface ####
 
-    @warn_format_error
+    @catch_format_error
     def __call__(self, obj):
         """Compute the pretty representation of the object."""
         if not self.pprint:
-            return pretty._safe_repr(obj)
+            return repr(obj)
         else:
-            # This uses use StringIO, as cStringIO doesn't handle unicode.
-            stream = StringIO()
-            # self.newline.encode() is a quick fix for issue gh-597. We need to
-            # ensure that stream does not get a mix of unicode and bytestrings,
-            # or it will cause trouble.
+            # handle str and unicode on Python 2
+            # io.StringIO only accepts unicode,
+            # cStringIO doesn't handle unicode on py2,
+            # StringIO allows str, unicode but only ascii str
+            stream = pretty.CUnicodeIO()
             printer = pretty.RepresentationPrinter(stream, self.verbose,
-                self.max_width, unicode_to_str(self.newline),
+                self.max_width, self.newline,
+                max_seq_length=self.max_seq_length,
                 singleton_pprinters=self.singleton_printers,
                 type_pprinters=self.type_printers,
                 deferred_pprinters=self.deferred_printers)
@@ -667,6 +690,20 @@ class HTMLFormatter(BaseFormatter):
 
     print_method = ObjectName('_repr_html_')
 
+
+class MarkdownFormatter(BaseFormatter):
+    """A Markdown formatter.
+
+    To define the callables that compute the Markdown representation of your
+    objects, define a :meth:`_repr_markdown_` method or use the :meth:`for_type`
+    or :meth:`for_type_by_name` methods to register functions that handle
+    this.
+
+    The return value of this formatter should be a valid Markdown.
+    """
+    format_type = Unicode('text/markdown')
+
+    print_method = ObjectName('_repr_markdown_')
 
 class SVGFormatter(BaseFormatter):
     """An SVG formatter.
@@ -741,16 +778,41 @@ class LatexFormatter(BaseFormatter):
 class JSONFormatter(BaseFormatter):
     """A JSON string formatter.
 
-    To define the callables that compute the JSON string representation of
+    To define the callables that compute the JSONable representation of
     your objects, define a :meth:`_repr_json_` method or use the :meth:`for_type`
     or :meth:`for_type_by_name` methods to register functions that handle
     this.
 
-    The return value of this formatter should be a valid JSON string.
+    The return value of this formatter should be a JSONable list or dict.
+    JSON scalars (None, number, string) are not allowed, only dict or list containers.
     """
     format_type = Unicode('application/json')
+    _return_type = (list, dict)
 
     print_method = ObjectName('_repr_json_')
+    
+    def _check_return(self, r, obj):
+        """Check that a return value is appropriate
+        
+        Return the value if so, None otherwise, warning if invalid.
+        """
+        if r is None:
+            return
+        md = None
+        if isinstance(r, tuple):
+            # unpack data, metadata tuple for type checking on first element
+            r, md = r
+        
+        # handle deprecated JSON-as-string form from IPython < 3
+        if isinstance(r, string_types):
+            warnings.warn("JSON expects JSONable list/dict containers, not JSON strings",
+            FormatterWarning)
+            r = json.loads(r)
+        
+        if md is not None:
+            # put the tuple back together
+            r = (r, md)
+        return super(JSONFormatter, self)._check_return(r, obj)
 
 
 class JavascriptFormatter(BaseFormatter):
@@ -772,7 +834,7 @@ class JavascriptFormatter(BaseFormatter):
 class PDFFormatter(BaseFormatter):
     """A PDF formatter.
 
-    To defined the callables that compute to PDF representation of your
+    To define the callables that compute the PDF representation of your
     objects, define a :meth:`_repr_pdf_` method or use the :meth:`for_type`
     or :meth:`for_type_by_name` methods to register functions that handle
     this.
@@ -784,10 +846,47 @@ class PDFFormatter(BaseFormatter):
 
     print_method = ObjectName('_repr_pdf_')
 
+    _return_type = (bytes, unicode_type)
+
+class IPythonDisplayFormatter(BaseFormatter):
+    """A Formatter for objects that know how to display themselves.
+    
+    To define the callables that compute the representation of your
+    objects, define a :meth:`_ipython_display_` method or use the :meth:`for_type`
+    or :meth:`for_type_by_name` methods to register functions that handle
+    this. Unlike mime-type displays, this method should not return anything,
+    instead calling any appropriate display methods itself.
+    
+    This display formatter has highest priority.
+    If it fires, no other display formatter will be called.
+    """
+    print_method = ObjectName('_ipython_display_')
+    _return_type = (type(None), bool)
+    
+
+    @catch_format_error
+    def __call__(self, obj):
+        """Compute the format for an object."""
+        if self.enabled:
+            # lookup registered printer
+            try:
+                printer = self.lookup(obj)
+            except KeyError:
+                pass
+            else:
+                printer(obj)
+                return True
+            # Finally look for special method names
+            method = get_real_method(obj, self.print_method)
+            if method is not None:
+                method()
+                return True
+
 
 FormatterABC.register(BaseFormatter)
 FormatterABC.register(PlainTextFormatter)
 FormatterABC.register(HTMLFormatter)
+FormatterABC.register(MarkdownFormatter)
 FormatterABC.register(SVGFormatter)
 FormatterABC.register(PNGFormatter)
 FormatterABC.register(PDFFormatter)
@@ -795,6 +894,7 @@ FormatterABC.register(JPEGFormatter)
 FormatterABC.register(LatexFormatter)
 FormatterABC.register(JSONFormatter)
 FormatterABC.register(JavascriptFormatter)
+FormatterABC.register(IPythonDisplayFormatter)
 
 
 def format_display_data(obj, include=None, exclude=None):
@@ -806,6 +906,7 @@ def format_display_data(obj, include=None, exclude=None):
 
     * text/plain
     * text/html
+    * text/markdown
     * text/latex
     * application/json
     * application/javascript
@@ -838,7 +939,7 @@ def format_display_data(obj, include=None, exclude=None):
     """
     from IPython.core.interactiveshell import InteractiveShell
 
-    InteractiveShell.instance().display_formatter.format(
+    return InteractiveShell.instance().display_formatter.format(
         obj,
         include,
         exclude
